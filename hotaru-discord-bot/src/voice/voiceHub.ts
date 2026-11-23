@@ -56,6 +56,8 @@ export const voiceDiagnostics = {
   ytDlpPath: null as string | null,
   lastVoiceError: null as string | null,
   lastPlayedTitle: null as string | null,
+  connectionState: "idle" as string,
+  stateHistory: [] as string[],
 };
 
 const guildStates = new Map<string, GuildAudioState>();
@@ -126,15 +128,57 @@ async function ensureConnection(
   }
 
   // สำคัญ: ตั้ง selfDeaf: false เพื่อไม่ให้บอทขึ้นไอคอนปิดหูฟังตัวเองในห้องเสียง
-  const connection = joinVoiceChannel({
-    channelId: voiceChannel.id,
-    guildId: voiceChannel.guild.id,
-    adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-    selfDeaf: false,
-    selfMute: false,
-  });
+  let connection: VoiceConnection | null = null;
+  let lastConnectErr: unknown = null;
 
-  await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const candidate = joinVoiceChannel({
+      channelId: voiceChannel.id,
+      guildId: voiceChannel.guild.id,
+      adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+      selfDeaf: false,
+      selfMute: false,
+    });
+
+    voiceDiagnostics.stateHistory = [];
+    candidate.on("stateChange", (oldState, newState) => {
+      voiceDiagnostics.connectionState = newState.status;
+      const entry = `${oldState.status}->${newState.status}`;
+      voiceDiagnostics.stateHistory = [...voiceDiagnostics.stateHistory.slice(-6), entry];
+    });
+    candidate.on("error", (err) => {
+      voiceDiagnostics.lastVoiceError = err.message;
+      console.error("VoiceConnection error:", err);
+    });
+
+    try {
+      await entersState(candidate, VoiceConnectionStatus.Ready, 20_000);
+      connection = candidate;
+      voiceDiagnostics.lastVoiceError = null;
+      break;
+    } catch (err) {
+      lastConnectErr = err;
+      const stuckAt = candidate.state.status;
+      const msg = err instanceof Error ? err.message : String(err);
+      voiceDiagnostics.lastVoiceError = `Attempt ${attempt} failed at state [${stuckAt}]: ${msg}`;
+      console.warn(voiceDiagnostics.lastVoiceError);
+      try {
+        candidate.destroy();
+      } catch {
+        // Ignore destroy error
+      }
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+  }
+
+  if (!connection) {
+    const errMsg = lastConnectErr instanceof Error ? lastConnectErr.message : String(lastConnectErr);
+    throw new Error(
+      `เชื่อมต่อห้องเสียงไม่สำเร็จ (${voiceDiagnostics.connectionState}): ${errMsg} — หากเปิดบน Render แล้วค้างที่ connecting/signalling อาจเกิดจาก Render บล็อกพอร์ต UDP ของ Discord Voice ค่ะ`
+    );
+  }
 
   const player = createAudioPlayer({
     behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -647,4 +691,16 @@ export function getQueueSnapshot(guildId: string) {
     upcoming: state.queue,
     loopMode: state.loopMode,
   };
+}
+
+export function destroyAllVoiceConnections() {
+  for (const [guildId, state] of guildStates.entries()) {
+    try {
+      state.player.stop();
+      state.connection.destroy();
+    } catch {
+      // Ignore cleanup error
+    }
+    guildStates.delete(guildId);
+  }
 }

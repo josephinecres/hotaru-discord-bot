@@ -1,4 +1,5 @@
 import "dotenv/config";
+import dns from "node:dns";
 import http from "node:http";
 import ffmpegPath from "ffmpeg-static";
 import {
@@ -12,6 +13,7 @@ import {
 import { aiDiagnostics, chatAsHotaru } from "./persona.js";
 import { createTarotReadingEmbed } from "./commands/tarot.js";
 import {
+  destroyAllVoiceConnections,
   enqueueMusic,
   getQueueSnapshot,
   nextMusic,
@@ -20,6 +22,9 @@ import {
   toggleLoop,
   voiceDiagnostics,
 } from "./voice/voiceHub.js";
+
+// บังคับให้ Node เลือก IPv4 ก่อน (ช่วยลดปัญหา UDP/HTTP ค้างบน Render / Docker)
+dns.setDefaultResultOrder("ipv4first");
 
 // ตั้งค่า path ของ FFmpeg ให้ @discordjs/voice ใช้งานได้บน Render Linux
 if (ffmpegPath && !process.env.FFMPEG_PATH) {
@@ -338,6 +343,19 @@ process.on("uncaughtException", (err) => {
   lastDiscordError = err.message;
   console.error("Uncaught exception:", err);
 });
+
+function shutdownGracefully(signal: string) {
+  console.log(`Received ${signal}, shutting down Hotaru gracefully...`);
+  destroyAllVoiceConnections();
+  void client.destroy();
+  server.close(() => {
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 2000).unref();
+}
+
+process.on("SIGTERM", () => shutdownGracefully("SIGTERM"));
+process.on("SIGINT", () => shutdownGracefully("SIGINT"));
 
 const discordToken = process.env.DISCORD_TOKEN?.trim();
 if (!discordToken) {
