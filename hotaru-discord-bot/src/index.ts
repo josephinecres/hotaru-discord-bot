@@ -9,7 +9,7 @@ import {
   Routes,
   SlashCommandBuilder,
 } from "discord.js";
-import { chatAsHotaru } from "./persona.js";
+import { aiDiagnostics, chatAsHotaru } from "./persona.js";
 import { createTarotReadingEmbed } from "./commands/tarot.js";
 import {
   enqueueMusic,
@@ -254,6 +254,7 @@ const server = http.createServer((req, res) => {
         hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
         aiProvider: process.env.AI_PROVIDER || "auto",
         ttsProvider: process.env.TTS_PROVIDER || "auto",
+        aiDiagnostics,
         lastError: lastDiscordError,
         uptimeSeconds: Math.floor(process.uptime()),
       })

@@ -53,8 +53,18 @@ interface SimpleMessage {
   content: string;
 }
 
+export const aiDiagnostics = {
+  lastProvider: null as string | null,
+  lastGroqError: null as string | null,
+  lastGeminiError: null as string | null,
+};
+
+function cleanEnv(value?: string): string {
+  return (value || "").trim().replace(/^["']|["']$/g, "").trim();
+}
+
 async function callGroq(messages: SimpleMessage[], systemInstruction: string): Promise<string> {
-  const groqKey = process.env.GROQ_API_KEY?.trim();
+  const groqKey = cleanEnv(process.env.GROQ_API_KEY);
   if (!groqKey) throw new Error("Missing GROQ_API_KEY");
 
   const groqModels = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
@@ -66,6 +76,8 @@ async function callGroq(messages: SimpleMessage[], systemInstruction: string): P
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Accept": "application/json",
+          "User-Agent": "HotaruDiscordBot/1.0",
           Authorization: `Bearer ${groqKey}`,
         },
         body: JSON.stringify({
@@ -78,16 +90,20 @@ async function callGroq(messages: SimpleMessage[], systemInstruction: string): P
 
       if (!res.ok) {
         const errBody = await res.text();
-        throw new Error(`Groq HTTP ${res.status}: ${errBody}`);
+        throw new Error(`Groq HTTP ${res.status}: ${errBody.slice(0, 300)}`);
       }
 
       const data = (await res.json()) as {
         choices?: Array<{ message?: { content?: string } }>;
       };
       const text = data.choices?.[0]?.message?.content?.trim();
-      if (text) return text;
+      if (text) {
+        aiDiagnostics.lastGroqError = null;
+        return text;
+      }
     } catch (err) {
       lastError = err;
+      aiDiagnostics.lastGroqError = err instanceof Error ? err.message : String(err);
       await new Promise((r) => setTimeout(r, 600));
     }
   }
@@ -151,11 +167,17 @@ export async function generateTextWithRetry(
   let lastError: unknown;
   for (const provider of order) {
     try {
-      return provider === "groq"
-        ? await callGroq(messages, systemInstruction)
-        : await callGemini(messages, systemInstruction);
+      const result =
+        provider === "groq"
+          ? await callGroq(messages, systemInstruction)
+          : await callGemini(messages, systemInstruction);
+      aiDiagnostics.lastProvider = provider;
+      if (provider === "gemini") aiDiagnostics.lastGeminiError = null;
+      return result;
     } catch (err) {
-      console.warn(`Provider ${provider} failed, trying fallback...`, err);
+      const errStr = err instanceof Error ? err.message : String(err);
+      if (provider === "gemini") aiDiagnostics.lastGeminiError = errStr;
+      console.warn(`Provider ${provider} failed (${errStr}), trying fallback...`);
       lastError = err;
     }
   }
