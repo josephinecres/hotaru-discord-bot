@@ -14,7 +14,7 @@ import {
 import { VoiceBasedChannel } from "discord.js";
 import play from "play-dl";
 import { Readable } from "stream";
-import { ai } from "../persona.js";
+import { getAi } from "../persona.js";
 
 export interface SongItem {
   title: string;
@@ -85,56 +85,63 @@ async function processNextAudio(guildId: string): Promise<void> {
   const state = guildStates.get(guildId);
   if (!state) return;
 
-  // ให้ความสำคัญกับการอ่าน TTS ก่อนถ้ามีคิวข้อความรอพูด
-  if (state.ttsQueue.length > 0) {
-    const nextText = state.ttsQueue.shift()!;
-    state.isSpeakingTts = true;
+  try {
+    // ให้ความสำคัญกับการอ่าน TTS ก่อนถ้ามีคิวข้อความรอพูด
+    if (state.ttsQueue.length > 0) {
+      const nextText = state.ttsQueue.shift()!;
+      state.isSpeakingTts = true;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash-lite-tts",
-      contents: [
-        {
-          role: "user",
-          parts: [
-            {
-              text: nextText,
-              speechMetadata: {
-                style: "Gentle, warm, polite young female secretary voice",
+      const ai = getAi();
+      const response = await ai.models.generateContent({
+        model: "gemini-3.8-flash-lite-tts",
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                text: nextText,
+                speechMetadata: {
+                  style: "Gentle, warm, polite young female secretary voice",
+                },
               },
-            },
-          ],
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ["AUDIO"],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
+          },
         },
-      ],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Kore" } },
-        },
-      },
-    });
+      });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (base64Audio) {
-      const wavBuffer = Buffer.from(base64Audio, "base64");
-      const stream = Readable.from(wavBuffer);
-      const resource: AudioResource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary,
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        const wavBuffer = Buffer.from(base64Audio, "base64");
+        const stream = Readable.from(wavBuffer);
+        const resource: AudioResource = createAudioResource(stream, {
+          inputType: StreamType.Arbitrary,
+        });
+        state.player.play(resource);
+        return;
+      }
+      state.isSpeakingTts = false;
+    }
+
+    // เล่นเพลงถัดไปในคิว
+    if (!state.currentSong && state.queue.length > 0) {
+      const nextSong = state.queue.shift()!;
+      state.currentSong = nextSong;
+      const streamInfo = await play.stream(nextSong.url);
+      const resource = createAudioResource(streamInfo.stream, {
+        inputType: streamInfo.type,
       });
       state.player.play(resource);
-      return;
     }
+  } catch (err) {
+    console.error("Voice playback error:", err);
     state.isSpeakingTts = false;
-  }
-
-  // เล่นเพลงถัดไปในคิว
-  if (!state.currentSong && state.queue.length > 0) {
-    const nextSong = state.queue.shift()!;
-    state.currentSong = nextSong;
-    const streamInfo = await play.stream(nextSong.url);
-    const resource = createAudioResource(streamInfo.stream, {
-      inputType: streamInfo.type,
-    });
-    state.player.play(resource);
+    state.currentSong = null;
   }
 }
 

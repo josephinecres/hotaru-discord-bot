@@ -1,8 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
 
-export const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY!,
-});
+export function getAi(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    throw new Error("Missing GEMINI_API_KEY in Render Environment Variables.");
+  }
+  return new GoogleGenAI({ apiKey });
+}
 
 export const HOTARU_SYSTEM_PROMPT = `คุณคือ "โฮตารุ" (Hotaru) บอทดิสคอร์ดประจำเซิร์ฟเวอร์
 ประวัติและตัวตน:
@@ -46,6 +50,34 @@ export const MAJOR_ARCANA: TarotCardData[] = [
   { numeral: "XXI", name: "The World", nameTh: "โลกอันสมบูรณ์", upright: "ความสำเร็จครบบริบูรณ์ ความสมดุล", reversed: "อีกก้าวเดียวสู่ความสมบูรณ์" }
 ];
 
+export async function generateTextWithRetry(
+  contents: Parameters<GoogleGenAI["models"]["generateContent"]>[0]["contents"],
+  systemInstruction: string
+): Promise<string> {
+  const ai = getAi();
+  const modelsToTry = ["gemini-4-hydrogen", "gemini-4-hydrogen", "gemini-3.1-flash-lite"];
+
+  let lastError: unknown;
+  for (let i = 0; i < modelsToTry.length; i++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: modelsToTry[i],
+        contents,
+        config: { systemInstruction },
+      });
+      const text = response.text?.trim();
+      if (text) return text;
+    } catch (err) {
+      lastError = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTransient = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
+      if (!isTransient && i === 0) break;
+      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Model temporarily unavailable");
+}
+
 const channelHistory = new Map<string, Array<{ role: "user" | "model"; text: string }>>();
 
 export async function chatAsHotaru(channelId: string, userName: string, userMessage: string): Promise<string> {
@@ -61,15 +93,7 @@ export async function chatAsHotaru(channelId: string, userName: string, userMess
     },
   ];
 
-  const response = await ai.models.generateContent({
-    model: "gemini-4-hydrogen",
-    contents,
-    config: {
-      systemInstruction: HOTARU_SYSTEM_PROMPT,
-    },
-  });
-
-  const reply = response.text?.trim() || "ขออภัยนะคะ เมื่อสักครู่แสงตะเกียงกะพริบเล็กน้อย ลองคุยกับโฮตารุใหม่อีกครั้งนะคะ";
+  const reply = await generateTextWithRetry(contents, HOTARU_SYSTEM_PROMPT);
   history.push({ role: "user", text: `${userName}: ${userMessage}` });
   history.push({ role: "model", text: reply });
   if (history.length > 24) history.splice(0, history.length - 24);

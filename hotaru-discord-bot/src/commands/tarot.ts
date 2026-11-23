@@ -1,5 +1,5 @@
 import { EmbedBuilder } from "discord.js";
-import { ai, HOTARU_SYSTEM_PROMPT, MAJOR_ARCANA } from "../persona.js";
+import { generateTextWithRetry, HOTARU_SYSTEM_PROMPT, MAJOR_ARCANA } from "../persona.js";
 
 export async function createTarotReadingEmbed(
   userName: string,
@@ -28,21 +28,15 @@ export async function createTarotReadingEmbed(
     )
     .join("\n");
 
-  const response = await ai.models.generateContent({
-    model: "gemini-4-hydrogen",
-    contents: `ผู้ถาม: ${userName}
+  const interpretation = await generateTextWithRetry(
+    `ผู้ถาม: ${userName}
 คำถาม: "${question || "ขอคำแนะนำสำหรับวันนี้"}"
 ไพ่ที่เปิดได้:
 ${summaryForAi}
 
 ช่วยทำนายไพ่ชุดนี้ในฐานะโฮตารุอย่างอบอุ่น อ่อนโยน และให้กำลังใจ (ความยาวพอดีสำหรับ Discord Embed)`,
-    config: {
-      systemInstruction: HOTARU_SYSTEM_PROMPT,
-    },
-  });
-
-  const interpretation =
-    response.text?.trim() || "ไพ่กำลังสะท้อนความสงบในใจของคุณค่ะ ขอให้แสงตะเกียงของท่านโจเซฟีนคุ้มครองนะคะ";
+    HOTARU_SYSTEM_PROMPT
+  );
 
   const embed = new EmbedBuilder()
     .setColor(0xf59e0b)

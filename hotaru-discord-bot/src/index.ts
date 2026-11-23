@@ -66,17 +66,37 @@ const commands = [
     ),
 ].map((cmd) => cmd.toJSON());
 
-async function registerSlashCommands() {
-  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN!);
-  await rest.put(Routes.applicationCommands(process.env.DISCORD_CLIENT_ID!), {
-    body: commands,
-  });
-  console.log("Hotaru slash commands registered.");
+let lastDiscordError: string | null = null;
+
+async function registerSlashCommands(token: string) {
+  const clientId = process.env.DISCORD_CLIENT_ID?.trim();
+  if (!clientId) {
+    console.warn("DISCORD_CLIENT_ID is not set; skipping slash command registration.");
+    return;
+  }
+  try {
+    const rest = new REST({ version: "10" }).setToken(token);
+    await rest.put(Routes.applicationCommands(clientId), {
+      body: commands,
+    });
+    console.log("Hotaru slash commands registered.");
+  } catch (err) {
+    console.error("Failed to register slash commands:", err);
+  }
 }
 
+client.on(Events.Error, (err) => {
+  lastDiscordError = err.message;
+  console.error("Discord client error:", err);
+});
+
 client.once(Events.ClientReady, async (readyClient) => {
+  lastDiscordError = null;
   console.log(`Hotaru is awake in the Garden of Dreams as ${readyClient.user.tag}`);
-  await registerSlashCommands();
+  const token = process.env.DISCORD_TOKEN?.trim();
+  if (token) {
+    await registerSlashCommands(token);
+  }
 });
 
 // จัดการ Slash Commands
@@ -161,52 +181,77 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
 
-  // 1. Auto-TTS Channel: พิมพ์อะไรในห้องนี้ โฮตารุจะพูดตามใน Voice Chat ทันที
-  if (process.env.AUTO_TTS_CHANNEL_ID && message.channelId === process.env.AUTO_TTS_CHANNEL_ID) {
-    const voiceChannel = message.member?.voice.channel;
-    if (voiceChannel && message.content.trim()) {
-      await speakTtsInVoice(voiceChannel, message.content.trim());
-    }
-    return;
-  }
-
-  // 2. Prefix command !say สำหรับ TTS ด่วน
-  if (message.content.startsWith("!say ")) {
-    const text = message.content.slice(5).trim();
-    const voiceChannel = message.member?.voice.channel;
-    if (!voiceChannel) {
-      await message.reply("เข้าห้องเสียงก่อนนะคะ เดี๋ยวโฮตารุตามเข้าไปอ่านให้ฟังค่ะ");
+  try {
+    // 1. Auto-TTS Channel: พิมพ์อะไรในห้องนี้ โฮตารุจะพูดตามใน Voice Chat ทันที
+    if (process.env.AUTO_TTS_CHANNEL_ID && message.channelId === process.env.AUTO_TTS_CHANNEL_ID) {
+      const voiceChannel = message.member?.voice.channel;
+      if (voiceChannel && message.content.trim()) {
+        await speakTtsInVoice(voiceChannel, message.content.trim());
+      }
       return;
     }
-    if (text) {
-      await speakTtsInVoice(voiceChannel, text);
+
+    // 2. Prefix command !say สำหรับ TTS ด่วน
+    if (message.content.startsWith("!say ")) {
+      const text = message.content.slice(5).trim();
+      const voiceChannel = message.member?.voice.channel;
+      if (!voiceChannel) {
+        await message.reply("เข้าห้องเสียงก่อนนะคะ เดี๋ยวโฮตารุตามเข้าไปอ่านให้ฟังค่ะ");
+        return;
+      }
+      if (text) {
+        await speakTtsInVoice(voiceChannel, text);
+      }
+      return;
     }
-    return;
-  }
 
-  // 3. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
-  const isMentioned = client.user ? message.mentions.has(client.user) : false;
-  const isAutoChat = process.env.AUTO_CHAT_CHANNEL_ID === message.channelId;
+    // 3. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
+    const isMentioned = client.user ? message.mentions.has(client.user) : false;
+    const isAutoChat = process.env.AUTO_CHAT_CHANNEL_ID === message.channelId;
 
-  if (isMentioned || isAutoChat) {
-    const cleanContent = message.content.replace(/<@!?\d+>/g, "").trim();
-    if (!cleanContent) return;
+    if (isMentioned || isAutoChat) {
+      const cleanContent = message.content.replace(/<@!?\d+>/g, "").trim();
+      if (!cleanContent) return;
 
-    await message.channel.sendTyping();
-    const reply = await chatAsHotaru(message.channelId, message.member?.displayName || message.author.username, cleanContent);
-    await message.reply(reply);
+      await message.channel.sendTyping();
+      const reply = await chatAsHotaru(
+        message.channelId,
+        message.member?.displayName || message.author.username,
+        cleanContent
+      );
+      await message.reply(reply);
+    }
+  } catch (err) {
+    console.error("Message handler error:", err);
+    try {
+      await message.reply(
+        "ขออภัยนะคะ ตอนนี้แสงตะเกียงในสวนแห่งฝันมีผู้มาเยือนหนาแน่นสักครู่ ลองส่งข้อความหาโฮตารุอีกครั้งนะคะ"
+      );
+    } catch {
+      // Ignore if unable to reply
+    }
   }
 });
 
-// เปิด HTTP Server บน PORT ที่ Render กำหนด เพื่อให้ Web Service ผ่าน Health Check
+// เปิด HTTP Server บน PORT ที่ Render กำหนด เพื่อให้ Web Service ผ่าน Health Check และเช็กสถานะบอทได้
 const PORT = Number(process.env.PORT) || 3000;
 const server = http.createServer((req, res) => {
-  if (req.url === "/health" || req.url === "/") {
+  const urlPath = (req.url || "/").split("?")[0];
+  if (urlPath === "/health" || urlPath === "/") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
     res.end(
       JSON.stringify({
         ok: true,
-        bot: client.user?.tag ?? "connecting",
+        discordReady: client.isReady(),
+        bot: client.user?.tag ?? null,
+        hasDiscordToken: Boolean(process.env.DISCORD_TOKEN?.trim()),
+        hasClientId: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
+        hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
+        lastError: lastDiscordError,
         uptimeSeconds: Math.floor(process.uptime()),
       })
     );
@@ -220,9 +265,28 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`Hotaru health server listening on port ${PORT}`);
 });
 
-if (!process.env.DISCORD_TOKEN) {
-  console.error("Missing DISCORD_TOKEN in environment variables.");
-  process.exit(1);
-}
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  lastDiscordError = msg;
+  console.error("Unhandled rejection:", reason);
+});
 
-client.login(process.env.DISCORD_TOKEN);
+process.on("uncaughtException", (err) => {
+  lastDiscordError = err.message;
+  console.error("Uncaught exception:", err);
+});
+
+const discordToken = process.env.DISCORD_TOKEN?.trim();
+if (!discordToken) {
+  lastDiscordError = "Missing DISCORD_TOKEN in Environment Variables.";
+  console.error(lastDiscordError);
+} else {
+  client.login(discordToken).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    lastDiscordError = msg;
+    console.error("Discord login failed:", msg);
+    if (msg.toLowerCase().includes("disallowed intents")) {
+      console.error("HINT: Open Discord Developer Portal -> Bot -> Enable 'MESSAGE CONTENT INTENT' and 'SERVER MEMBERS INTENT'.");
+    }
+  });
+}
