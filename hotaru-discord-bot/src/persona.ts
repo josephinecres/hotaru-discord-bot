@@ -55,6 +55,7 @@ interface SimpleMessage {
 
 export const aiDiagnostics = {
   lastProvider: null as string | null,
+  lastGroqModel: null as string | null,
   lastGroqError: null as string | null,
   lastGeminiError: null as string | null,
 };
@@ -63,12 +64,59 @@ function cleanEnv(value?: string): string {
   return (value || "").trim().replace(/^["']|["']$/g, "").trim();
 }
 
+let cachedGroqModels: { models: string[]; fetchedAt: number } | null = null;
+
+async function getGroqChatModels(groqKey: string): Promise<string[]> {
+  if (cachedGroqModels && Date.now() - cachedGroqModels.fetchedAt < 10 * 60 * 1000) {
+    return cachedGroqModels.models;
+  }
+
+  try {
+    const res = await fetch("https://api.groq.com/openai/v1/models", {
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "HotaruDiscordBot/1.0",
+        Authorization: `Bearer ${groqKey}`,
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`Models list HTTP ${res.status}`);
+    }
+    const json = (await res.json()) as {
+      data?: Array<{ id: string; active?: boolean }>;
+    };
+    const banned = ["whisper", "guard", "tts", "orpheus", "playai", "safeguard"];
+    const candidates = (json.data || [])
+      .filter((m) => m.active !== false && !banned.some((b) => m.id.toLowerCase().includes(b)))
+      .map((m) => m.id);
+
+    const priorityKeywords = ["llama-3.3-70b", "qwen", "gpt-oss", "llama-4", "deepseek", "gemma", "llama-3.1"];
+    candidates.sort((a, b) => {
+      const idxA = priorityKeywords.findIndex((k) => a.toLowerCase().includes(k));
+      const idxB = priorityKeywords.findIndex((k) => b.toLowerCase().includes(k));
+      const scoreA = idxA === -1 ? 99 : idxA;
+      const scoreB = idxB === -1 ? 99 : idxB;
+      return scoreA - scoreB;
+    });
+
+    if (candidates.length > 0) {
+      const top = candidates.slice(0, 4);
+      cachedGroqModels = { models: top, fetchedAt: Date.now() };
+      return top;
+    }
+  } catch (err) {
+    console.warn("Could not list Groq models, using fallback list:", err);
+  }
+
+  return ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "qwen/qwen3-32b", "llama-3.1-8b-instant"];
+}
+
 async function callGroq(messages: SimpleMessage[], systemInstruction: string): Promise<string> {
   const groqKey = cleanEnv(process.env.GROQ_API_KEY);
   if (!groqKey) throw new Error("Missing GROQ_API_KEY");
 
-  const groqModels = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
-  let lastError: unknown;
+  const groqModels = await getGroqChatModels(groqKey);
+  const errors: string[] = [];
 
   for (const model of groqModels) {
     try {
@@ -90,7 +138,7 @@ async function callGroq(messages: SimpleMessage[], systemInstruction: string): P
 
       if (!res.ok) {
         const errBody = await res.text();
-        throw new Error(`Groq HTTP ${res.status}: ${errBody.slice(0, 300)}`);
+        throw new Error(`${model} -> HTTP ${res.status}: ${errBody.slice(0, 220)}`);
       }
 
       const data = (await res.json()) as {
@@ -98,16 +146,20 @@ async function callGroq(messages: SimpleMessage[], systemInstruction: string): P
       };
       const text = data.choices?.[0]?.message?.content?.trim();
       if (text) {
+        aiDiagnostics.lastGroqModel = model;
         aiDiagnostics.lastGroqError = null;
         return text;
       }
     } catch (err) {
-      lastError = err;
-      aiDiagnostics.lastGroqError = err instanceof Error ? err.message : String(err);
-      await new Promise((r) => setTimeout(r, 600));
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push(msg);
+      await new Promise((r) => setTimeout(r, 400));
     }
   }
-  throw lastError instanceof Error ? lastError : new Error("Groq request failed");
+
+  const combined = errors.join(" | ");
+  aiDiagnostics.lastGroqError = combined;
+  throw new Error(combined || "Groq request failed");
 }
 
 async function callGemini(messages: SimpleMessage[], systemInstruction: string): Promise<string> {
