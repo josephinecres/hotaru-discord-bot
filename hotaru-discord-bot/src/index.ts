@@ -14,9 +14,10 @@ import { createTarotReadingEmbed } from "./commands/tarot.js";
 import {
   enqueueMusic,
   getQueueSnapshot,
-  skipMusic,
+  nextMusic,
   speakTtsInVoice,
   stopAndLeave,
+  toggleLoop,
 } from "./voice/voiceHub.js";
 
 // ตั้งค่า path ของ FFmpeg ให้ @discordjs/voice ใช้งานได้บน Render Linux
@@ -49,15 +50,7 @@ const commands = [
           { name: "3 ใบ (อดีต - ปัจจุบัน - อนาคต)", value: "three" }
         )
     ),
-  new SlashCommandBuilder()
-    .setName("play")
-    .setDescription("ให้โฮตารุเปิดเพลงในห้องเสียง (Voice Channel)")
-    .addStringOption((opt) =>
-      opt.setName("query").setDescription("ชื่อเพลงหรือลิงก์ YouTube").setRequired(true)
-    ),
-  new SlashCommandBuilder().setName("skip").setDescription("ข้ามเพลงที่กำลังเล่นอยู่"),
   new SlashCommandBuilder().setName("queue").setDescription("ดูรายการเพลงในคิวของโฮตารุ"),
-  new SlashCommandBuilder().setName("stop").setDescription("หยุดเพลงและออกจากห้องเสียง"),
   new SlashCommandBuilder()
     .setName("tts")
     .setDescription("ให้โฮตารุพูดข้อความที่คุณพิมพ์ออกเสียงในห้องเสียง")
@@ -99,7 +92,7 @@ client.once(Events.ClientReady, async (readyClient) => {
   }
 });
 
-// จัดการ Slash Commands
+// จัดการ Slash Commands (/tarot, /queue, /tts)
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -113,44 +106,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (interaction.commandName === "play") {
-      const member = await interaction.guild?.members.fetch(interaction.user.id);
-      const voiceChannel = member?.voice.channel;
-      if (!voiceChannel) {
-        await interaction.reply({ content: "กรุณาเข้าห้องเสียงก่อนนะคะ โฮตารุจะได้ตามเข้าไปเปิดเพลงให้ค่ะ", ephemeral: true });
-        return;
-      }
-      await interaction.deferReply();
-      const query = interaction.options.getString("query", true);
-      const { song, position } = await enqueueMusic(voiceChannel, query, interaction.user.displayName);
-      await interaction.editReply(
-        `จัดเตรียมเพลง **${song.title}** (${song.durationRaw}) เข้าคิวลำดับที่ ${position} ให้เรียบร้อยแล้วค่ะ`
-      );
-      return;
-    }
-
-    if (interaction.commandName === "skip") {
-      const ok = interaction.guildId ? skipMusic(interaction.guildId) : false;
-      await interaction.reply(ok ? "ข้ามไปเพลงถัดไปให้แล้วนะคะ" : "ตอนนี้ยังไม่มีเพลงกำลังเล่นอยู่เลยค่ะ");
-      return;
-    }
-
     if (interaction.commandName === "queue") {
       const snap = interaction.guildId ? getQueueSnapshot(interaction.guildId) : null;
       if (!snap || (!snap.current && snap.upcoming.length === 0)) {
-        await interaction.reply("ตอนนี้คิวเพลงยังว่างอยู่เลยค่ะ ลองใช้คำสั่ง `/play` ได้นะคะ");
+        await interaction.reply("ตอนนี้คิวเพลงยังว่างอยู่เลยค่ะ ลองใช้คำสั่ง `!runmusic ชื่อเพลงหรือลิงก์` ได้นะคะ");
         return;
       }
       const list = snap.upcoming.slice(0, 8).map((s, i) => `${i + 1}. ${s.title} (${s.durationRaw})`).join("\n");
+      const loopText = snap.loopMode === "track" ? "เปิดลูปเพลงนี้" : snap.loopMode === "queue" ? "เปิดลูปทั้งคิว" : "ปิดลูป";
       await interaction.reply(
-        `**กำลังเล่น:** ${snap.current?.title || "-"}\n**คิวถัดไป:**\n${list || "ไม่มีเพลงรอคิว"}`
+        `**กำลังเล่น:** ${snap.current?.title || "-"} (${loopText})\n**คิวถัดไป:**\n${list || "ไม่มีเพลงรอคิว"}`
       );
-      return;
-    }
-
-    if (interaction.commandName === "stop") {
-      const ok = interaction.guildId ? stopAndLeave(interaction.guildId) : false;
-      await interaction.reply(ok ? "โฮตารุเก็บตะเกียงและออกจากห้องเสียงเรียบร้อยแล้วค่ะ" : "โฮตารุไม่ได้อยู่ในห้องเสียงค่ะ");
       return;
     }
 
@@ -177,23 +143,105 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// จัดการแชทพูดคุยปกติ (เมื่อ Mention บอท หรือพิมพ์ในห้องแชทที่กำหนด) และ Auto-TTS
+// จัดการคำสั่งเพลง (!runmusic, !loop, !next, !leave, !queue), !say TTS, และแชท AI ปกติ
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
 
   try {
-    // 1. Auto-TTS Channel: พิมพ์อะไรในห้องนี้ โฮตารุจะพูดตามใน Voice Chat ทันที
-    if (process.env.AUTO_TTS_CHANNEL_ID && message.channelId === process.env.AUTO_TTS_CHANNEL_ID) {
+    const raw = message.content.trim();
+    const lower = raw.toLowerCase();
+
+    // 1. คำสั่งเปิดเพลง: !runmusic <ชื่อเพลง / ลิงก์ YouTube / ลิงก์ Spotify>
+    if (lower === "!runmusic" || lower.startsWith("!runmusic ")) {
+      const query = raw.slice("!runmusic".length).trim();
+      if (!query) {
+        await message.reply("พิมพ์ชื่อเพลง หรือวางลิงก์ YouTube / Spotify หลังคำสั่งได้เลยนะคะ เช่น `!runmusic https://open.spotify.com/...`");
+        return;
+      }
       const voiceChannel = message.member?.voice.channel;
-      if (voiceChannel && message.content.trim()) {
-        await speakTtsInVoice(voiceChannel, message.content.trim());
+      if (!voiceChannel) {
+        await message.reply("กรุณาเข้าห้องเสียงก่อนนะคะ โฮตารุจะได้ตามเข้าไปเปิดเพลงให้ค่ะ");
+        return;
+      }
+      await message.channel.sendTyping();
+      const { songs, startPosition } = await enqueueMusic(
+        voiceChannel,
+        query,
+        message.member?.displayName || message.author.username
+      );
+      if (songs.length === 1) {
+        await message.reply(
+          `จัดเตรียมเพลง **${songs[0].title}** (${songs[0].durationRaw}) เข้าคิวลำดับที่ ${startPosition} ให้เรียบร้อยแล้วค่ะ`
+        );
+      } else {
+        await message.reply(
+          `เพิ่มเพลย์ลิสต์ทั้งหมด **${songs.length} เพลง** (เริ่มจาก **${songs[0].title}**) เข้าคิวให้เรียบร้อยแล้วค่ะ`
+        );
       }
       return;
     }
 
-    // 2. Prefix command !say สำหรับ TTS ด่วน
-    if (message.content.startsWith("!say ")) {
-      const text = message.content.slice(5).trim();
+    // 2. คำสั่งลูปเพลง: !loop (สลับเปิด/ปิดลูปเพลงปัจจุบัน) หรือ !loop queue (ลูปทั้งคิว)
+    if (lower === "!loop" || lower.startsWith("!loop ")) {
+      const arg = raw.slice("!loop".length).trim();
+      const res = toggleLoop(message.guild.id, arg);
+      if (!res.ok) {
+        await message.reply("ตอนนี้โฮตารุยังไม่ได้เปิดเพลงในห้องเสียงเลยค่ะ");
+        return;
+      }
+      const label =
+        res.mode === "track"
+          ? "เปิดลูปเพลงที่กำลังเล่นอยู่แล้วค่ะ"
+          : res.mode === "queue"
+            ? "เปิดลูปทั้งคิวเพลงแล้วค่ะ"
+            : "ปิดโหมดลูปเพลงแล้วนะคะ";
+      await message.reply(label);
+      return;
+    }
+
+    // 3. คำสั่งข้ามเพลง: !next
+    if (lower === "!next") {
+      const ok = nextMusic(message.guild.id);
+      await message.reply(ok ? "ข้ามไปเพลงถัดไปให้แล้วนะคะ" : "ตอนนี้ยังไม่มีเพลงกำลังเล่นอยู่เลยค่ะ");
+      return;
+    }
+
+    // 4. คำสั่งออกจากห้องเสียง: !leave
+    if (lower === "!leave") {
+      const ok = stopAndLeave(message.guild.id);
+      await message.reply(
+        ok ? "โฮตารุเก็บตะเกียงและออกจากห้องเสียงเรียบร้อยแล้วค่ะ" : "ตอนนี้โฮตารุไม่ได้อยู่ในห้องเสียงค่ะ"
+      );
+      return;
+    }
+
+    // 5. ดูคิวเพลง: !queue
+    if (lower === "!queue") {
+      const snap = getQueueSnapshot(message.guild.id);
+      if (!snap || (!snap.current && snap.upcoming.length === 0)) {
+        await message.reply("ตอนนี้คิวเพลงยังว่างอยู่เลยค่ะ ลองพิมพ์ `!runmusic ชื่อเพลงหรือลิงก์` ได้นะคะ");
+        return;
+      }
+      const list = snap.upcoming.slice(0, 8).map((s, i) => `${i + 1}. ${s.title} (${s.durationRaw})`).join("\n");
+      const loopText = snap.loopMode === "track" ? "เปิดลูปเพลงนี้" : snap.loopMode === "queue" ? "เปิดลูปทั้งคิว" : "ปิดลูป";
+      await message.reply(
+        `**กำลังเล่น:** ${snap.current?.title || "-"} (${loopText})\n**คิวถัดไป:**\n${list || "ไม่มีเพลงรอคิว"}`
+      );
+      return;
+    }
+
+    // 6. Auto-TTS Channel: พิมพ์อะไรในห้องนี้ โฮตารุจะพูดตามใน Voice Chat ทันที
+    if (process.env.AUTO_TTS_CHANNEL_ID && message.channelId === process.env.AUTO_TTS_CHANNEL_ID) {
+      const voiceChannel = message.member?.voice.channel;
+      if (voiceChannel && raw) {
+        await speakTtsInVoice(voiceChannel, raw);
+      }
+      return;
+    }
+
+    // 7. Prefix command !say สำหรับ TTS ด่วน
+    if (lower.startsWith("!say ")) {
+      const text = raw.slice(5).trim();
       const voiceChannel = message.member?.voice.channel;
       if (!voiceChannel) {
         await message.reply("เข้าห้องเสียงก่อนนะคะ เดี๋ยวโฮตารุตามเข้าไปอ่านให้ฟังค่ะ");
@@ -205,12 +253,12 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    // 3. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
+    // 8. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
     const isMentioned = client.user ? message.mentions.has(client.user) : false;
     const isAutoChat = process.env.AUTO_CHAT_CHANNEL_ID === message.channelId;
 
     if (isMentioned || isAutoChat) {
-      const cleanContent = message.content.replace(/<@!?\d+>/g, "").trim();
+      const cleanContent = raw.replace(/<@!?\d+>/g, "").trim();
       if (!cleanContent) return;
 
       await message.channel.sendTyping();
@@ -225,7 +273,7 @@ client.on(Events.MessageCreate, async (message) => {
     console.error("Message handler error:", err);
     try {
       await message.reply(
-        "ขออภัยนะคะ ตอนนี้แสงตะเกียงในสวนแห่งฝันมีผู้มาเยือนหนาแน่นสักครู่ ลองส่งข้อความหาโฮตารุอีกครั้งนะคะ"
+        "ขออภัยนะคะ เกิดขัดข้องเล็กน้อยระหว่างจัดการคำขอ ลองใหม่อีกครั้งนะคะ"
       );
     } catch {
       // Ignore if unable to reply

@@ -16,6 +16,8 @@ import play from "play-dl";
 import { Readable } from "stream";
 import { getAi } from "../persona.js";
 
+export type LoopMode = "off" | "track" | "queue";
+
 export interface SongItem {
   title: string;
   url: string;
@@ -28,6 +30,8 @@ interface GuildAudioState {
   player: AudioPlayer;
   queue: SongItem[];
   currentSong: SongItem | null;
+  loopMode: LoopMode;
+  skipRequested: boolean;
   ttsQueue: string[];
   isSpeakingTts: boolean;
 }
@@ -59,6 +63,8 @@ async function ensureConnection(voiceChannel: VoiceBasedChannel): Promise<GuildA
     player,
     queue: [],
     currentSong: null,
+    loopMode: "off",
+    skipRequested: false,
     ttsQueue: [],
     isSpeakingTts: false,
   };
@@ -67,10 +73,26 @@ async function ensureConnection(voiceChannel: VoiceBasedChannel): Promise<GuildA
     if (state.isSpeakingTts) {
       state.isSpeakingTts = false;
       void processNextAudio(voiceChannel.guild.id);
-    } else {
-      state.currentSong = null;
-      void processNextAudio(voiceChannel.guild.id);
+      return;
     }
+
+    const finishedSong = state.currentSong;
+    state.currentSong = null;
+
+    if (state.skipRequested) {
+      state.skipRequested = false;
+      if (state.loopMode === "queue" && finishedSong) {
+        state.queue.push(finishedSong);
+      }
+    } else if (finishedSong) {
+      if (state.loopMode === "track") {
+        state.queue.unshift(finishedSong);
+      } else if (state.loopMode === "queue") {
+        state.queue.push(finishedSong);
+      }
+    }
+
+    void processNextAudio(voiceChannel.guild.id);
   });
 
   connection.on(VoiceConnectionStatus.Disconnected, () => {
@@ -202,42 +224,144 @@ async function processNextAudio(guildId: string): Promise<void> {
   }
 }
 
+async function resolveSpotifyQueries(spotifyUrl: string): Promise<string[]> {
+  const cleanUrl = spotifyUrl.split("?")[0];
+  const match = cleanUrl.match(/open\.spotify\.com\/(?:intl-[a-z]+\/)?(track|playlist|album)\/([a-zA-Z0-9]+)/i);
+  if (!match) return [];
+
+  const kind = match[1].toLowerCase();
+  const id = match[2];
+
+  // ดึงข้อมูลเพลงจาก Spotify Embed / oEmbed โดยไม่ต้องใช้ Spotify API Key
+  try {
+    const embedRes = await fetch(`https://open.spotify.com/embed/${kind}/${id}`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+    });
+    if (embedRes.ok) {
+      const html = await embedRes.text();
+      const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+      if (nextDataMatch) {
+        const parsed = JSON.parse(nextDataMatch[1]) as {
+          props?: {
+            pageProps?: {
+              state?: {
+                data?: {
+                  entity?: {
+                    name?: string;
+                    title?: string;
+                    artists?: Array<{ name: string }>;
+                    trackList?: Array<{ title?: string; subtitle?: string }>;
+                  };
+                };
+              };
+            };
+          };
+        };
+        const entity = parsed.props?.pageProps?.state?.data?.entity;
+        if (entity?.trackList && entity.trackList.length > 0) {
+          return entity.trackList
+            .slice(0, 15)
+            .map((t) => `${t.title || ""} ${t.subtitle || ""}`.trim())
+            .filter(Boolean);
+        }
+        if (entity?.name || entity?.title) {
+          const artist = entity.artists?.map((a) => a.name).join(" ") || "";
+          return [`${entity.name || entity.title} ${artist}`.trim()];
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("Spotify embed parse failed, trying oEmbed:", err);
+  }
+
+  // Fallback ด้วย Spotify oEmbed API สาธารณะ
+  const oembedRes = await fetch(
+    `https://open.spotify.com/oembed?url=${encodeURIComponent(cleanUrl)}`,
+    { headers: { "User-Agent": "HotaruDiscordBot/1.0" } }
+  );
+  if (oembedRes.ok) {
+    const oembed = (await oembedRes.json()) as { title?: string };
+    if (oembed.title) return [oembed.title];
+  }
+
+  return [];
+}
+
 export async function enqueueMusic(
   voiceChannel: VoiceBasedChannel,
-  query: string,
+  rawQuery: string,
   requestedBy: string
-): Promise<{ song: SongItem; position: number }> {
+): Promise<{ songs: SongItem[]; startPosition: number }> {
+  const query = rawQuery.replace(/^<|>$/g, "").trim();
   const state = await ensureConnection(voiceChannel);
+  const startPosition = state.queue.length + 1;
+  const addedSongs: SongItem[] = [];
 
-  let song: SongItem;
-  if (play.yt_validate(query) === "video") {
+  // 1. รองรับลิงก์ Spotify (Track / Playlist / Album)
+  if (/open\.spotify\.com/i.test(query)) {
+    const queries = await resolveSpotifyQueries(query);
+    if (queries.length === 0) {
+      throw new Error("โฮตารุไม่สามารถดึงข้อมูลเพลงจากลิงก์ Spotify นี้ได้ค่ะ ลองส่งเป็นลิงก์เพลงเดี่ยวหรือชื่อเพลงดูนะคะ");
+    }
+    for (const q of queries) {
+      const results = await play.search(q, { limit: 1 });
+      if (results.length > 0) {
+        const track = results[0];
+        addedSongs.push({
+          title: track.title || q,
+          url: track.url,
+          requestedBy,
+          durationRaw: track.durationRaw,
+        });
+      }
+    }
+    if (addedSongs.length === 0) {
+      throw new Error("ไม่พบไฟล์เสียงสำหรับลิงก์ Spotify นี้ค่ะ");
+    }
+  } else if (play.yt_validate(query) === "playlist") {
+    // 2. รองรับลิงก์ YouTube Playlist
+    const playlist = await play.playlist_info(query, { incomplete: true });
+    const videos = await playlist.all_videos();
+    for (const v of videos.slice(0, 15)) {
+      addedSongs.push({
+        title: v.title || "YouTube Track",
+        url: v.url,
+        requestedBy,
+        durationRaw: v.durationRaw,
+      });
+    }
+  } else if (play.yt_validate(query) === "video") {
+    // 3. รองรับลิงก์ YouTube เดี่ยว
     const info = await play.video_basic_info(query);
-    song = {
+    addedSongs.push({
       title: info.video_details.title || "Unknown Track",
       url: info.video_details.url,
       requestedBy,
       durationRaw: info.video_details.durationRaw,
-    };
+    });
   } else {
+    // 4. ค้นหาจากชื่อเพลง
     const results = await play.search(query, { limit: 1 });
     if (results.length === 0) {
       throw new Error("โฮตารุหาเพลงที่ต้องการไม่พบค่ะ ลองเปลี่ยนคำค้นหาดูนะคะ");
     }
     const track = results[0];
-    song = {
+    addedSongs.push({
       title: track.title || query,
       url: track.url,
       requestedBy,
       durationRaw: track.durationRaw,
-    };
+    });
   }
 
-  state.queue.push(song);
+  state.queue.push(...addedSongs);
   if (state.player.state.status === AudioPlayerStatus.Idle && !state.isSpeakingTts) {
     await processNextAudio(voiceChannel.guild.id);
   }
 
-  return { song, position: state.queue.length };
+  return { songs: addedSongs, startPosition };
 }
 
 export async function speakTtsInVoice(
@@ -251,9 +375,25 @@ export async function speakTtsInVoice(
   }
 }
 
-export function skipMusic(guildId: string): boolean {
+export function toggleLoop(guildId: string, arg?: string): { ok: boolean; mode: LoopMode } {
   const state = guildStates.get(guildId);
-  if (!state) return false;
+  if (!state) return { ok: false, mode: "off" };
+
+  const cleanArg = (arg || "").trim().toLowerCase();
+  if (cleanArg === "queue") {
+    state.loopMode = state.loopMode === "queue" ? "off" : "queue";
+  } else if (cleanArg === "off") {
+    state.loopMode = "off";
+  } else {
+    state.loopMode = state.loopMode === "off" ? "track" : "off";
+  }
+  return { ok: true, mode: state.loopMode };
+}
+
+export function nextMusic(guildId: string): boolean {
+  const state = guildStates.get(guildId);
+  if (!state || (!state.currentSong && state.queue.length === 0)) return false;
+  state.skipRequested = true;
   state.player.stop();
   return true;
 }
@@ -264,6 +404,8 @@ export function stopAndLeave(guildId: string): boolean {
   state.queue = [];
   state.ttsQueue = [];
   state.currentSong = null;
+  state.loopMode = "off";
+  state.skipRequested = false;
   state.player.stop();
   state.connection.destroy();
   guildStates.delete(guildId);
@@ -276,5 +418,6 @@ export function getQueueSnapshot(guildId: string) {
   return {
     current: state.currentSong,
     upcoming: state.queue,
+    loopMode: state.loopMode,
   };
 }
