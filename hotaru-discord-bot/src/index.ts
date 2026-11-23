@@ -18,6 +18,7 @@ import {
   speakTtsInVoice,
   stopAndLeave,
   toggleLoop,
+  voiceDiagnostics,
 } from "./voice/voiceHub.js";
 
 // ตั้งค่า path ของ FFmpeg ให้ @discordjs/voice ใช้งานได้บน Render Linux
@@ -167,7 +168,8 @@ client.on(Events.MessageCreate, async (message) => {
       const { songs, startPosition } = await enqueueMusic(
         voiceChannel,
         query,
-        message.member?.displayName || message.author.username
+        message.member?.displayName || message.author.username,
+        message.channel.isSendable() ? message.channel : undefined
       );
       if (songs.length === 1) {
         await message.reply(
@@ -234,7 +236,11 @@ client.on(Events.MessageCreate, async (message) => {
     if (process.env.AUTO_TTS_CHANNEL_ID && message.channelId === process.env.AUTO_TTS_CHANNEL_ID) {
       const voiceChannel = message.member?.voice.channel;
       if (voiceChannel && raw) {
-        await speakTtsInVoice(voiceChannel, raw);
+        await speakTtsInVoice(
+          voiceChannel,
+          raw,
+          message.channel.isSendable() ? message.channel : undefined
+        );
       }
       return;
     }
@@ -248,7 +254,11 @@ client.on(Events.MessageCreate, async (message) => {
         return;
       }
       if (text) {
-        await speakTtsInVoice(voiceChannel, text);
+        await speakTtsInVoice(
+          voiceChannel,
+          text,
+          message.channel.isSendable() ? message.channel : undefined
+        );
       }
       return;
     }
@@ -303,6 +313,7 @@ const server = http.createServer((req, res) => {
         aiProvider: process.env.AI_PROVIDER || "auto",
         ttsProvider: process.env.TTS_PROVIDER || "auto",
         aiDiagnostics,
+        voiceDiagnostics,
         lastError: lastDiscordError,
         uptimeSeconds: Math.floor(process.uptime()),
       })

@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { execSync } from "node:child_process";
 import {
   AudioPlayer,
   AudioPlayerStatus,
@@ -12,9 +15,17 @@ import {
   VoiceConnectionStatus,
 } from "@discordjs/voice";
 import { VoiceBasedChannel } from "discord.js";
+import sodium from "libsodium-wrappers";
 import play from "play-dl";
 import { Readable } from "stream";
+import YouTubeModule from "youtube-sr";
+import YTDlpWrapModule from "yt-dlp-wrap";
 import { getAi } from "../persona.js";
+
+const YouTube =
+  (YouTubeModule as unknown as { default?: typeof YouTubeModule }).default || YouTubeModule;
+const YTDlpWrap =
+  (YTDlpWrapModule as unknown as { default?: typeof YTDlpWrapModule }).default || YTDlpWrapModule;
 
 export type LoopMode = "off" | "track" | "queue";
 
@@ -23,6 +34,10 @@ export interface SongItem {
   url: string;
   requestedBy: string;
   durationRaw: string;
+}
+
+export interface SendableChannelLike {
+  send: (content: string) => Promise<unknown>;
 }
 
 interface GuildAudioState {
@@ -34,20 +49,89 @@ interface GuildAudioState {
   skipRequested: boolean;
   ttsQueue: string[];
   isSpeakingTts: boolean;
+  textChannel?: SendableChannelLike;
 }
+
+export const voiceDiagnostics = {
+  ytDlpPath: null as string | null,
+  lastVoiceError: null as string | null,
+  lastPlayedTitle: null as string | null,
+};
 
 const guildStates = new Map<string, GuildAudioState>();
 
-async function ensureConnection(voiceChannel: VoiceBasedChannel): Promise<GuildAudioState> {
+let ytDlpInstance: InstanceType<typeof YTDlpWrap> | null = null;
+let ytDlpInitPromise: Promise<InstanceType<typeof YTDlpWrap> | null> | null = null;
+
+function findSystemYtDlp(): string | null {
+  const candidates = ["/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp", path.join("/tmp", "yt-dlp")];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  try {
+    const resolved = execSync("which yt-dlp", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+    if (resolved) return resolved;
+  } catch {
+    // Not found in PATH
+  }
+  return null;
+}
+
+async function getYtDlp(): Promise<InstanceType<typeof YTDlpWrap> | null> {
+  if (ytDlpInstance) return ytDlpInstance;
+  if (ytDlpInitPromise) return ytDlpInitPromise;
+
+  ytDlpInitPromise = (async () => {
+    try {
+      let binaryPath = findSystemYtDlp();
+      if (!binaryPath) {
+        const tmpBin = path.join("/tmp", "yt-dlp");
+        console.log("Downloading yt-dlp binary for YouTube audio streaming...");
+        await YTDlpWrap.downloadFromGithub(tmpBin);
+        fs.chmodSync(tmpBin, 0o755);
+        binaryPath = tmpBin;
+      }
+      voiceDiagnostics.ytDlpPath = binaryPath;
+      ytDlpInstance = new YTDlpWrap(binaryPath);
+      return ytDlpInstance;
+    } catch (err) {
+      console.warn("yt-dlp initialization failed, will fallback to play-dl:", err);
+      return null;
+    }
+  })();
+
+  return ytDlpInitPromise;
+}
+
+async function ensureConnection(
+  voiceChannel: VoiceBasedChannel,
+  textChannel?: SendableChannelLike
+): Promise<GuildAudioState> {
+  await sodium.ready;
+
   const existing = guildStates.get(voiceChannel.guild.id);
   if (existing && existing.connection.state.status !== VoiceConnectionStatus.Destroyed) {
+    if (textChannel) existing.textChannel = textChannel;
+    if (existing.connection.joinConfig.channelId !== voiceChannel.id) {
+      existing.connection.rejoin({
+        channelId: voiceChannel.id,
+        selfDeaf: false,
+        selfMute: false,
+      });
+      await entersState(existing.connection, VoiceConnectionStatus.Ready, 20_000);
+    }
     return existing;
   }
 
+  // สำคัญ: ตั้ง selfDeaf: false เพื่อไม่ให้บอทขึ้นไอคอนปิดหูฟังตัวเองในห้องเสียง
   const connection = joinVoiceChannel({
     channelId: voiceChannel.id,
     guildId: voiceChannel.guild.id,
     adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+    selfDeaf: false,
+    selfMute: false,
   });
 
   await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
@@ -67,6 +151,7 @@ async function ensureConnection(voiceChannel: VoiceBasedChannel): Promise<GuildA
     skipRequested: false,
     ttsQueue: [],
     isSpeakingTts: false,
+    textChannel,
   };
 
   player.on(AudioPlayerStatus.Idle, () => {
@@ -95,7 +180,32 @@ async function ensureConnection(voiceChannel: VoiceBasedChannel): Promise<GuildA
     void processNextAudio(voiceChannel.guild.id);
   });
 
-  connection.on(VoiceConnectionStatus.Disconnected, () => {
+  player.on("error", (err) => {
+    console.error("AudioPlayer error:", err);
+    voiceDiagnostics.lastVoiceError = err.message;
+    state.isSpeakingTts = false;
+    state.currentSong = null;
+    void state.textChannel
+      ?.send(`เกิดปัญหาขณะส่งเสียงเพลง: ${err.message.slice(0, 180)}`)
+      .catch(() => {});
+    void processNextAudio(voiceChannel.guild.id);
+  });
+
+  connection.on(VoiceConnectionStatus.Disconnected, async () => {
+    try {
+      await Promise.race([
+        entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
+        entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
+      ]);
+    } catch {
+      if (connection.state.status !== VoiceConnectionStatus.Destroyed) {
+        connection.destroy();
+      }
+      guildStates.delete(voiceChannel.guild.id);
+    }
+  });
+
+  connection.on(VoiceConnectionStatus.Destroyed, () => {
     guildStates.delete(voiceChannel.guild.id);
   });
 
@@ -117,6 +227,30 @@ function splitTtsChunks(text: string, maxLen = 170): string[] {
   }
   if (current) chunks.push(current.trim());
   return chunks.length > 0 ? chunks : [text.slice(0, maxLen)];
+}
+
+function wrapPcmWithWavHeader(pcmBuffer: Buffer, sampleRate = 24000, channels = 1, bitsPerSample = 16): Buffer {
+  // ถ้ามี RIFF header อยู่แล้ว ไม่ต้องครอบซ้ำ
+  if (pcmBuffer.length >= 4 && pcmBuffer.subarray(0, 4).toString("ascii") === "RIFF") {
+    return pcmBuffer;
+  }
+  const byteRate = (sampleRate * channels * bitsPerSample) / 8;
+  const blockAlign = (channels * bitsPerSample) / 8;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcmBuffer.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcmBuffer.length, 40);
+  return Buffer.concat([header, pcmBuffer]);
 }
 
 async function synthesizeFreeTtsBuffer(text: string): Promise<Buffer> {
@@ -173,9 +307,14 @@ async function synthesizeTtsBuffer(text: string): Promise<Buffer | null> {
         },
       });
 
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        return Buffer.from(base64Audio, "base64");
+      const inline = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+      if (inline?.data) {
+        const rawBuf = Buffer.from(inline.data, "base64");
+        const mime = (inline.mimeType || "").toLowerCase();
+        if (mime.includes("pcm") || mime.includes("l16") || !mime.includes("wav")) {
+          return wrapPcmWithWavHeader(rawBuf, 24000, 1, 16);
+        }
+        return rawBuf;
       }
     } catch (err) {
       console.warn("Gemini TTS failed, switching to Free Thai/EN TTS:", err);
@@ -183,6 +322,43 @@ async function synthesizeTtsBuffer(text: string): Promise<Buffer | null> {
   }
 
   return synthesizeFreeTtsBuffer(text);
+}
+
+async function createMusicResource(songUrl: string): Promise<AudioResource> {
+  const ytDlp = await getYtDlp();
+  if (ytDlp) {
+    try {
+      const stream = ytDlp.execStream([
+        songUrl,
+        "-f",
+        "bestaudio[ext=webm]/bestaudio/best",
+        "--no-playlist",
+        "--no-warnings",
+        "-o",
+        "-",
+      ]);
+      stream.on("error", (err) => {
+        voiceDiagnostics.lastVoiceError = err.message;
+        console.error("yt-dlp stream error:", err.message);
+      });
+      const resource = createAudioResource(stream, {
+        inputType: StreamType.Arbitrary,
+        inlineVolume: true,
+      });
+      resource.volume?.setVolume(0.85);
+      return resource;
+    } catch (err) {
+      console.warn("yt-dlp failed, trying play-dl fallback:", err);
+    }
+  }
+
+  const streamInfo = await play.stream(songUrl);
+  const resource = createAudioResource(streamInfo.stream, {
+    inputType: streamInfo.type,
+    inlineVolume: true,
+  });
+  resource.volume?.setVolume(0.85);
+  return resource;
 }
 
 async function processNextAudio(guildId: string): Promise<void> {
@@ -200,8 +376,11 @@ async function processNextAudio(guildId: string): Promise<void> {
         const stream = Readable.from(audioBuffer);
         const resource: AudioResource = createAudioResource(stream, {
           inputType: StreamType.Arbitrary,
+          inlineVolume: true,
         });
+        resource.volume?.setVolume(1.0);
         state.player.play(resource);
+        voiceDiagnostics.lastVoiceError = null;
         return;
       }
       state.isSpeakingTts = false;
@@ -211,16 +390,20 @@ async function processNextAudio(guildId: string): Promise<void> {
     if (!state.currentSong && state.queue.length > 0) {
       const nextSong = state.queue.shift()!;
       state.currentSong = nextSong;
-      const streamInfo = await play.stream(nextSong.url);
-      const resource = createAudioResource(streamInfo.stream, {
-        inputType: streamInfo.type,
-      });
+      const resource = await createMusicResource(nextSong.url);
       state.player.play(resource);
+      voiceDiagnostics.lastPlayedTitle = nextSong.title;
+      voiceDiagnostics.lastVoiceError = null;
     }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     console.error("Voice playback error:", err);
+    voiceDiagnostics.lastVoiceError = msg;
     state.isSpeakingTts = false;
     state.currentSong = null;
+    void state.textChannel
+      ?.send(`ขออภัยนะคะ โฮตารุไม่สามารถเปิดเสียงเพลงนี้ได้: ${msg.slice(0, 180)}`)
+      .catch(() => {});
   }
 }
 
@@ -232,7 +415,6 @@ async function resolveSpotifyQueries(spotifyUrl: string): Promise<string[]> {
   const kind = match[1].toLowerCase();
   const id = match[2];
 
-  // ดึงข้อมูลเพลงจาก Spotify Embed / oEmbed โดยไม่ต้องใช้ Spotify API Key
   try {
     const embedRes = await fetch(`https://open.spotify.com/embed/${kind}/${id}`, {
       headers: {
@@ -276,7 +458,6 @@ async function resolveSpotifyQueries(spotifyUrl: string): Promise<string[]> {
     console.warn("Spotify embed parse failed, trying oEmbed:", err);
   }
 
-  // Fallback ด้วย Spotify oEmbed API สาธารณะ
   const oembedRes = await fetch(
     `https://open.spotify.com/oembed?url=${encodeURIComponent(cleanUrl)}`,
     { headers: { "User-Agent": "HotaruDiscordBot/1.0" } }
@@ -289,13 +470,42 @@ async function resolveSpotifyQueries(spotifyUrl: string): Promise<string[]> {
   return [];
 }
 
+async function searchOneYouTube(query: string, requestedBy: string): Promise<SongItem | null> {
+  try {
+    const video = await YouTube.searchOne(query);
+    if (video?.url) {
+      return {
+        title: video.title || query,
+        url: video.url,
+        requestedBy,
+        durationRaw: video.durationFormatted || "Live/Audio",
+      };
+    }
+  } catch (err) {
+    console.warn("youtube-sr searchOne failed, trying play-dl:", err);
+  }
+
+  const results = await play.search(query, { limit: 1 });
+  if (results.length > 0) {
+    const track = results[0];
+    return {
+      title: track.title || query,
+      url: track.url,
+      requestedBy,
+      durationRaw: track.durationRaw,
+    };
+  }
+  return null;
+}
+
 export async function enqueueMusic(
   voiceChannel: VoiceBasedChannel,
   rawQuery: string,
-  requestedBy: string
+  requestedBy: string,
+  textChannel?: SendableChannelLike
 ): Promise<{ songs: SongItem[]; startPosition: number }> {
   const query = rawQuery.replace(/^<|>$/g, "").trim();
-  const state = await ensureConnection(voiceChannel);
+  const state = await ensureConnection(voiceChannel, textChannel);
   const startPosition = state.queue.length + 1;
   const addedSongs: SongItem[] = [];
 
@@ -306,54 +516,70 @@ export async function enqueueMusic(
       throw new Error("โฮตารุไม่สามารถดึงข้อมูลเพลงจากลิงก์ Spotify นี้ได้ค่ะ ลองส่งเป็นลิงก์เพลงเดี่ยวหรือชื่อเพลงดูนะคะ");
     }
     for (const q of queries) {
-      const results = await play.search(q, { limit: 1 });
-      if (results.length > 0) {
-        const track = results[0];
-        addedSongs.push({
-          title: track.title || q,
-          url: track.url,
-          requestedBy,
-          durationRaw: track.durationRaw,
-        });
-      }
+      const found = await searchOneYouTube(q, requestedBy);
+      if (found) addedSongs.push(found);
     }
     if (addedSongs.length === 0) {
       throw new Error("ไม่พบไฟล์เสียงสำหรับลิงก์ Spotify นี้ค่ะ");
     }
-  } else if (play.yt_validate(query) === "playlist") {
+  } else if (/list=/.test(query) && /youtube\.com|youtu\.be/i.test(query)) {
     // 2. รองรับลิงก์ YouTube Playlist
-    const playlist = await play.playlist_info(query, { incomplete: true });
-    const videos = await playlist.all_videos();
-    for (const v of videos.slice(0, 15)) {
-      addedSongs.push({
-        title: v.title || "YouTube Track",
-        url: v.url,
-        requestedBy,
-        durationRaw: v.durationRaw,
-      });
+    try {
+      const playlist = await YouTube.getPlaylist(query, { fetchAll: false });
+      for (const v of playlist.videos.slice(0, 15)) {
+        if (v.url) {
+          addedSongs.push({
+            title: v.title || "YouTube Track",
+            url: v.url,
+            requestedBy,
+            durationRaw: v.durationFormatted || "-",
+          });
+        }
+      }
+    } catch {
+      const playlist = await play.playlist_info(query, { incomplete: true });
+      const videos = await playlist.all_videos();
+      for (const v of videos.slice(0, 15)) {
+        addedSongs.push({
+          title: v.title || "YouTube Track",
+          url: v.url,
+          requestedBy,
+          durationRaw: v.durationRaw,
+        });
+      }
     }
-  } else if (play.yt_validate(query) === "video") {
+  } else if (/^(https?:\/\/)?(www\.|m\.|music\.)?(youtube\.com|youtu\.be)\//i.test(query)) {
     // 3. รองรับลิงก์ YouTube เดี่ยว
-    const info = await play.video_basic_info(query);
+    let title = "YouTube Audio";
+    let durationRaw = "-";
+    try {
+      const info = await YouTube.getVideo(query);
+      if (info) {
+        title = info.title || title;
+        durationRaw = info.durationFormatted || durationRaw;
+      }
+    } catch {
+      try {
+        const info = await play.video_basic_info(query);
+        title = info.video_details.title || title;
+        durationRaw = info.video_details.durationRaw || durationRaw;
+      } catch {
+        // Fallback: ให้ yt-dlp ดึงสตรีมจาก URL โดยตรง
+      }
+    }
     addedSongs.push({
-      title: info.video_details.title || "Unknown Track",
-      url: info.video_details.url,
+      title,
+      url: query,
       requestedBy,
-      durationRaw: info.video_details.durationRaw,
+      durationRaw,
     });
   } else {
     // 4. ค้นหาจากชื่อเพลง
-    const results = await play.search(query, { limit: 1 });
-    if (results.length === 0) {
+    const found = await searchOneYouTube(query, requestedBy);
+    if (!found) {
       throw new Error("โฮตารุหาเพลงที่ต้องการไม่พบค่ะ ลองเปลี่ยนคำค้นหาดูนะคะ");
     }
-    const track = results[0];
-    addedSongs.push({
-      title: track.title || query,
-      url: track.url,
-      requestedBy,
-      durationRaw: track.durationRaw,
-    });
+    addedSongs.push(found);
   }
 
   state.queue.push(...addedSongs);
@@ -366,9 +592,10 @@ export async function enqueueMusic(
 
 export async function speakTtsInVoice(
   voiceChannel: VoiceBasedChannel,
-  text: string
+  text: string,
+  textChannel?: SendableChannelLike
 ): Promise<void> {
-  const state = await ensureConnection(voiceChannel);
+  const state = await ensureConnection(voiceChannel, textChannel);
   state.ttsQueue.push(text.slice(0, 400));
   if (state.player.state.status === AudioPlayerStatus.Idle) {
     await processNextAudio(voiceChannel.guild.id);
