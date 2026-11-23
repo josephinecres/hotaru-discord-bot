@@ -19,7 +19,8 @@
 4. ไปที่แท็บ **Environment** แล้วเพิ่มตัวแปร (Environment Variables):
    - `DISCORD_TOKEN` = Token ของบอทจาก Discord Developer Portal
    - `DISCORD_CLIENT_ID` = Application ID จาก Discord Developer Portal
-   - `GEMINI_API_KEY` = API Key จาก Google AI Studio
+   - `GROQ_API_KEY` = API Key ฟรีจาก [console.groq.com/keys](https://console.groq.com/keys) *(แนะนำ — เร็วและเสถียรมาก)*
+   - *(ไม่บังคับ)* `GEMINI_API_KEY` = สำหรับใช้เป็นตัวสำรองและเสียงพูด Gemini TTS (ถ้าไม่ใส่ ระบบจะใช้ Free Thai TTS ให้อัตโนมัติ)
    - *(ไม่บังคับ)* `AUTO_CHAT_CHANNEL_ID`, `AUTO_TTS_CHANNEL_ID`
 5. กด **Deploy Web Service** โค้ดมี Health Server พอร์ต `process.env.PORT` พร้อมเส้นทาง `/health` ให้ Render ตรวจสอบอัตโนมัติ
 6. *(เคล็ดลับ Free Plan)* Render Free จะพักการทำงานหากไม่มีทราฟฟิก 15 นาที สามารถนำ URL ของ Render (เช่น `https://hotaru-bot.onrender.com/health`) ไปตั้ง Ping ทุก 10 นาทีใน UptimeRobot ได้ฟรี เพื่อให้โฮตารุออนไลน์ตลอดเวลาค่ะ

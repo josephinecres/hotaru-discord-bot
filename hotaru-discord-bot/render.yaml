@@ -11,7 +11,13 @@ services:
         sync: false
       - key: DISCORD_CLIENT_ID
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
       - key: GEMINI_API_KEY
+        sync: false
+      - key: AI_PROVIDER
+        sync: false
+      - key: TTS_PROVIDER
         sync: false
       - key: AUTO_CHAT_CHANNEL_ID
         sync: false

@@ -81,17 +81,53 @@ async function ensureConnection(voiceChannel: VoiceBasedChannel): Promise<GuildA
   return state;
 }
 
-async function processNextAudio(guildId: string): Promise<void> {
-  const state = guildStates.get(guildId);
-  if (!state) return;
+function splitTtsChunks(text: string, maxLen = 170): string[] {
+  const words = text.trim().split(/\s+/);
+  const chunks: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if ((current + " " + word).trim().length > maxLen) {
+      if (current) chunks.push(current.trim());
+      current = word;
+    } else {
+      current = (current + " " + word).trim();
+    }
+  }
+  if (current) chunks.push(current.trim());
+  return chunks.length > 0 ? chunks : [text.slice(0, maxLen)];
+}
 
-  try {
-    // ให้ความสำคัญกับการอ่าน TTS ก่อนถ้ามีคิวข้อความรอพูด
-    if (state.ttsQueue.length > 0) {
-      const nextText = state.ttsQueue.shift()!;
-      state.isSpeakingTts = true;
+async function synthesizeFreeTtsBuffer(text: string): Promise<Buffer> {
+  const isThai = /[\u0E00-\u0E7F]/.test(text);
+  const lang = isThai ? "th" : "en";
+  const chunks = splitTtsChunks(text);
+  const buffers: Buffer[] = [];
 
-      const ai = getAi();
+  for (const chunk of chunks) {
+    const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encodeURIComponent(
+      chunk
+    )}`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      },
+    });
+    if (!res.ok) {
+      throw new Error(`Free TTS HTTP ${res.status}`);
+    }
+    const arr = await res.arrayBuffer();
+    buffers.push(Buffer.from(arr));
+  }
+
+  return Buffer.concat(buffers);
+}
+
+async function synthesizeTtsBuffer(text: string): Promise<Buffer | null> {
+  const ttsMode = (process.env.TTS_PROVIDER || "auto").toLowerCase();
+  const ai = ttsMode === "free" ? null : getAi();
+
+  if (ai) {
+    try {
       const response = await ai.models.generateContent({
         model: "gemini-3.8-flash-lite-tts",
         contents: [
@@ -99,7 +135,7 @@ async function processNextAudio(guildId: string): Promise<void> {
             role: "user",
             parts: [
               {
-                text: nextText,
+                text,
                 speechMetadata: {
                   style: "Gentle, warm, polite young female secretary voice",
                 },
@@ -117,8 +153,29 @@ async function processNextAudio(guildId: string): Promise<void> {
 
       const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (base64Audio) {
-        const wavBuffer = Buffer.from(base64Audio, "base64");
-        const stream = Readable.from(wavBuffer);
+        return Buffer.from(base64Audio, "base64");
+      }
+    } catch (err) {
+      console.warn("Gemini TTS failed, switching to Free Thai/EN TTS:", err);
+    }
+  }
+
+  return synthesizeFreeTtsBuffer(text);
+}
+
+async function processNextAudio(guildId: string): Promise<void> {
+  const state = guildStates.get(guildId);
+  if (!state) return;
+
+  try {
+    // ให้ความสำคัญกับการอ่าน TTS ก่อนถ้ามีคิวข้อความรอพูด
+    if (state.ttsQueue.length > 0) {
+      const nextText = state.ttsQueue.shift()!;
+      state.isSpeakingTts = true;
+
+      const audioBuffer = await synthesizeTtsBuffer(nextText);
+      if (audioBuffer && audioBuffer.length > 0) {
+        const stream = Readable.from(audioBuffer);
         const resource: AudioResource = createAudioResource(stream, {
           inputType: StreamType.Arbitrary,
         });

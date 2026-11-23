@@ -250,7 +250,10 @@ const server = http.createServer((req, res) => {
         bot: client.user?.tag ?? null,
         hasDiscordToken: Boolean(process.env.DISCORD_TOKEN?.trim()),
         hasClientId: Boolean(process.env.DISCORD_CLIENT_ID?.trim()),
+        hasGroqKey: Boolean(process.env.GROQ_API_KEY?.trim()),
         hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
+        aiProvider: process.env.AI_PROVIDER || "auto",
+        ttsProvider: process.env.TTS_PROVIDER || "auto",
         lastError: lastDiscordError,
         uptimeSeconds: Math.floor(process.uptime()),
       })
