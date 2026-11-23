@@ -1,10 +1,13 @@
 import "dotenv/config";
 import dns from "node:dns";
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import {
   Client,
   Events,
   GatewayIntentBits,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -14,6 +17,35 @@ import { createTarotReadingEmbed } from "./commands/tarot.js";
 
 // บังคับให้ Node เลือก IPv4 ก่อนเพื่อความเสถียรในการเชื่อมต่อบน Render / Docker
 dns.setDefaultResultOrder("ipv4first");
+
+const AUTO_CHAT_FILE = path.join(process.cwd(), "auto-chat-channels.json");
+const autoChatChannels = new Map<string, string>();
+
+function loadAutoChatChannels() {
+  try {
+    if (!fs.existsSync(AUTO_CHAT_FILE)) return;
+    const raw = fs.readFileSync(AUTO_CHAT_FILE, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    for (const [guildId, channelId] of Object.entries(parsed)) {
+      if (typeof channelId === "string" && channelId) {
+        autoChatChannels.set(guildId, channelId);
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to load auto-chat-channels.json:", err);
+  }
+}
+
+function saveAutoChatChannels() {
+  try {
+    const obj = Object.fromEntries(autoChatChannels.entries());
+    fs.writeFileSync(AUTO_CHAT_FILE, JSON.stringify(obj, null, 2), "utf8");
+  } catch (err) {
+    console.warn("Failed to save auto-chat-channels.json:", err);
+  }
+}
+
+loadAutoChatChannels();
 
 const client = new Client({
   intents: [
@@ -118,7 +150,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// จัดการคำสั่ง !tarot และแชท AI ปกติ (@Hotaru หรือ AUTO_CHAT_CHANNEL_ID)
+// จัดการคำสั่ง !tarot, !autochating และแชท AI ปกติ (@Hotaru หรือห้องที่ตั้งค่าไว้)
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
 
@@ -136,9 +168,76 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    // 2. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
+    // 2. คำสั่งตั้งค่าห้องคุยอัตโนมัติ: !autochating [#ห้อง | off | status]
+    if (
+      lower === "!autochating" ||
+      lower.startsWith("!autochating ") ||
+      lower === "!autochatting" ||
+      lower.startsWith("!autochatting ")
+    ) {
+      const canManage =
+        message.member?.permissions.has(PermissionFlagsBits.ManageChannels) ||
+        message.member?.permissions.has(PermissionFlagsBits.Administrator);
+      if (!canManage) {
+        await message.reply("ขออภัยนะคะ คำสั่ง `!autochating` ใช้ได้เฉพาะผู้ดูแลที่มีสิทธิ์ Manage Channels เท่านั้นค่ะ");
+        return;
+      }
+
+      const cmdLen = lower.startsWith("!autochatting") ? "!autochatting".length : "!autochating".length;
+      const arg = raw.slice(cmdLen).trim();
+      const argLower = arg.toLowerCase();
+
+      if (argLower === "off" || argLower === "stop" || argLower === "disable" || argLower === "ปิด") {
+        autoChatChannels.set(message.guild.id, "OFF");
+        saveAutoChatChannels();
+        await message.reply(
+          "ปิดโหมดแชทอัตโนมัติในเซิร์ฟเวอร์นี้แล้วนะคะ หากต้องการคุยกับโฮตารุสามารถแท็ก @Hotaru ได้เหมือนเดิมค่ะ"
+        );
+        return;
+      }
+
+      if (argLower === "status" || argLower === "check" || argLower === "สถานะ") {
+        const saved = autoChatChannels.get(message.guild.id);
+        const envId = process.env.AUTO_CHAT_CHANNEL_ID?.trim();
+        const activeId = saved === "OFF" ? null : saved || envId || null;
+        await message.reply(
+          activeId
+            ? `ตอนนี้โฮตารุกำลังเปิดโหมดคุยอัตโนมัติอยู่ในห้อง <#${activeId}> ค่ะ (ID: \`${activeId}\`)`
+            : "ตอนนี้ยังไม่ได้ตั้งค่าห้องคุยอัตโนมัติค่ะ พิมพ์ `!autochating` ในห้องที่ต้องการได้เลยนะคะ"
+        );
+        return;
+      }
+
+      const mentionedChannel = message.mentions.channels.first();
+      const idMatch = arg.match(/\d{17,20}/);
+      const targetChannelId = mentionedChannel?.id || idMatch?.[0] || message.channelId;
+      const targetChannel =
+        message.guild.channels.cache.get(targetChannelId) ??
+        (await message.guild.channels.fetch(targetChannelId).catch(() => null));
+
+      if (!targetChannel || !targetChannel.isTextBased()) {
+        await message.reply("ไม่พบห้องแชทข้อความที่ระบุค่ะ ลองพิมพ์ `!autochating` ในห้องที่ต้องการ หรือแท็ก `!autochating #ชื่อห้อง` นะคะ");
+        return;
+      }
+
+      autoChatChannels.set(message.guild.id, targetChannelId);
+      saveAutoChatChannels();
+      await message.reply(
+        `ตั้งค่าห้อง <#${targetChannelId}> เป็นห้องแชทพูดคุยกับโฮตารุเรียบร้อยแล้วค่ะ ทุกคนสามารถพิมพ์คุยกับโฮตารุในห้องนี้ได้ทันทีโดยไม่ต้องแท็กนะคะ\n*(ID ห้อง: \`${targetChannelId}\` · พิมพ์ \`!autochating off\` เพื่อปิดได้ตลอดเวลา)*`
+      );
+      return;
+    }
+
+    // 3. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้องที่ตั้งค่าไว้)
     const isMentioned = client.user ? message.mentions.has(client.user) : false;
-    const isAutoChat = process.env.AUTO_CHAT_CHANNEL_ID === message.channelId;
+    const savedAutoId = autoChatChannels.get(message.guild.id);
+    const envAutoId = process.env.AUTO_CHAT_CHANNEL_ID?.trim();
+    const isAutoChat =
+      savedAutoId === "OFF"
+        ? false
+        : savedAutoId
+          ? savedAutoId === message.channelId
+          : envAutoId === message.channelId;
 
     if (isMentioned || isAutoChat) {
       const cleanContent = raw.replace(/<@!?\d+>/g, "").trim();
@@ -184,6 +283,7 @@ const server = http.createServer((req, res) => {
         hasGroqKey: Boolean(process.env.GROQ_API_KEY?.trim()),
         hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
         aiProvider: process.env.AI_PROVIDER || "auto",
+        autoChatChannels: Object.fromEntries(autoChatChannels.entries()),
         aiDiagnostics,
         lastError: lastDiscordError,
         uptimeSeconds: Math.floor(process.uptime()),
