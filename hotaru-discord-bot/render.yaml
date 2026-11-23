@@ -17,9 +17,5 @@ services:
         sync: false
       - key: AI_PROVIDER
         sync: false
-      - key: TTS_PROVIDER
-        sync: false
       - key: AUTO_CHAT_CHANNEL_ID
-        sync: false
-      - key: AUTO_TTS_CHANNEL_ID
         sync: false

@@ -1,7 +1,6 @@
 import "dotenv/config";
 import dns from "node:dns";
 import http from "node:http";
-import ffmpegPath from "ffmpeg-static";
 import {
   Client,
   Events,
@@ -12,31 +11,15 @@ import {
 } from "discord.js";
 import { aiDiagnostics, chatAsHotaru } from "./persona.js";
 import { createTarotReadingEmbed } from "./commands/tarot.js";
-import {
-  destroyAllVoiceConnections,
-  enqueueMusic,
-  getQueueSnapshot,
-  nextMusic,
-  speakTtsInVoice,
-  stopAndLeave,
-  toggleLoop,
-  voiceDiagnostics,
-} from "./voice/voiceHub.js";
 
-// บังคับให้ Node เลือก IPv4 ก่อน (ช่วยลดปัญหา UDP/HTTP ค้างบน Render / Docker)
+// บังคับให้ Node เลือก IPv4 ก่อนเพื่อความเสถียรในการเชื่อมต่อบน Render / Docker
 dns.setDefaultResultOrder("ipv4first");
-
-// ตั้งค่า path ของ FFmpeg ให้ @discordjs/voice ใช้งานได้บน Render Linux
-if (ffmpegPath && !process.env.FFMPEG_PATH) {
-  process.env.FFMPEG_PATH = ffmpegPath;
-}
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates,
   ],
 });
 
@@ -55,13 +38,6 @@ const commands = [
           { name: "1 ใบ (สารแห่งแสงตะเกียง)", value: "single" },
           { name: "3 ใบ (อดีต - ปัจจุบัน - อนาคต)", value: "three" }
         )
-    ),
-  new SlashCommandBuilder().setName("queue").setDescription("ดูรายการเพลงในคิวของโฮตารุ"),
-  new SlashCommandBuilder()
-    .setName("tts")
-    .setDescription("ให้โฮตารุพูดข้อความที่คุณพิมพ์ออกเสียงในห้องเสียง")
-    .addStringOption((opt) =>
-      opt.setName("text").setDescription("ข้อความที่ต้องการให้อ่านออกเสียง").setRequired(true)
     ),
 ].map((cmd) => cmd.toJSON());
 
@@ -84,6 +60,26 @@ async function registerSlashCommands(token: string) {
   }
 }
 
+function parseTarotPrefixArgs(rawInput: string): { spread: "single" | "three"; question: string } {
+  const arg = rawInput.slice("!tarot".length).trim();
+  if (/^(1|single)\b/i.test(arg)) {
+    return {
+      spread: "single",
+      question: arg.replace(/^(1|single)\b\s*/i, "").trim(),
+    };
+  }
+  if (/^(3|three)\b/i.test(arg)) {
+    return {
+      spread: "three",
+      question: arg.replace(/^(3|three)\b\s*/i, "").trim(),
+    };
+  }
+  return {
+    spread: "three",
+    question: arg,
+  };
+}
+
 client.on(Events.Error, (err) => {
   lastDiscordError = err.message;
   console.error("Discord client error:", err);
@@ -98,7 +94,7 @@ client.once(Events.ClientReady, async (readyClient) => {
   }
 });
 
-// จัดการ Slash Commands (/tarot, /queue, /tts)
+// จัดการ Slash Command /tarot
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -111,36 +107,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.editReply({ embeds: [embed] });
       return;
     }
-
-    if (interaction.commandName === "queue") {
-      const snap = interaction.guildId ? getQueueSnapshot(interaction.guildId) : null;
-      if (!snap || (!snap.current && snap.upcoming.length === 0)) {
-        await interaction.reply("ตอนนี้คิวเพลงยังว่างอยู่เลยค่ะ ลองใช้คำสั่ง `!runmusic ชื่อเพลงหรือลิงก์` ได้นะคะ");
-        return;
-      }
-      const list = snap.upcoming.slice(0, 8).map((s, i) => `${i + 1}. ${s.title} (${s.durationRaw})`).join("\n");
-      const loopText = snap.loopMode === "track" ? "เปิดลูปเพลงนี้" : snap.loopMode === "queue" ? "เปิดลูปทั้งคิว" : "ปิดลูป";
-      await interaction.reply(
-        `**กำลังเล่น:** ${snap.current?.title || "-"} (${loopText})\n**คิวถัดไป:**\n${list || "ไม่มีเพลงรอคิว"}`
-      );
-      return;
-    }
-
-    if (interaction.commandName === "tts") {
-      const member = await interaction.guild?.members.fetch(interaction.user.id);
-      const voiceChannel = member?.voice.channel;
-      if (!voiceChannel) {
-        await interaction.reply({ content: "รบกวนเข้าห้องเสียงก่อนนะคะ โฮตารุจะได้พูดให้ฟังได้ค่ะ", ephemeral: true });
-        return;
-      }
-      await interaction.deferReply({ ephemeral: true });
-      const text = interaction.options.getString("text", true);
-      await speakTtsInVoice(voiceChannel, text);
-      await interaction.editReply(`โฮตารุอ่านข้อความ "${text}" ในห้องเสียงเรียบร้อยแล้วค่ะ`);
-    }
   } catch (error) {
     console.error(error);
-    const msg = "ขออภัยนะคะ เกิดขัดข้องเล็กน้อยระหว่างจัดการคำขอค่ะ";
+    const msg = "ขออภัยนะคะ เกิดขัดข้องเล็กน้อยระหว่างเปิดไพ่ค่ะ";
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply(msg);
     } else {
@@ -149,7 +118,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// จัดการคำสั่งเพลง (!runmusic, !loop, !next, !leave, !queue), !say TTS, และแชท AI ปกติ
+// จัดการคำสั่ง !tarot และแชท AI ปกติ (@Hotaru หรือ AUTO_CHAT_CHANNEL_ID)
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
 
@@ -157,118 +126,17 @@ client.on(Events.MessageCreate, async (message) => {
     const raw = message.content.trim();
     const lower = raw.toLowerCase();
 
-    // 1. คำสั่งเปิดเพลง: !runmusic <ชื่อเพลง / ลิงก์ YouTube / ลิงก์ Spotify>
-    if (lower === "!runmusic" || lower.startsWith("!runmusic ")) {
-      const query = raw.slice("!runmusic".length).trim();
-      if (!query) {
-        await message.reply("พิมพ์ชื่อเพลง หรือวางลิงก์ YouTube / Spotify หลังคำสั่งได้เลยนะคะ เช่น `!runmusic https://open.spotify.com/...`");
-        return;
-      }
-      const voiceChannel = message.member?.voice.channel;
-      if (!voiceChannel) {
-        await message.reply("กรุณาเข้าห้องเสียงก่อนนะคะ โฮตารุจะได้ตามเข้าไปเปิดเพลงให้ค่ะ");
-        return;
-      }
+    // 1. คำสั่งเปิดไพ่ทาโรต์: !tarot [1|3] [คำถาม]
+    if (lower === "!tarot" || lower.startsWith("!tarot ")) {
       await message.channel.sendTyping();
-      const { songs, startPosition } = await enqueueMusic(
-        voiceChannel,
-        query,
-        message.member?.displayName || message.author.username,
-        message.channel.isSendable() ? message.channel : undefined
-      );
-      if (songs.length === 1) {
-        await message.reply(
-          `จัดเตรียมเพลง **${songs[0].title}** (${songs[0].durationRaw}) เข้าคิวลำดับที่ ${startPosition} ให้เรียบร้อยแล้วค่ะ`
-        );
-      } else {
-        await message.reply(
-          `เพิ่มเพลย์ลิสต์ทั้งหมด **${songs.length} เพลง** (เริ่มจาก **${songs[0].title}**) เข้าคิวให้เรียบร้อยแล้วค่ะ`
-        );
-      }
+      const { spread, question } = parseTarotPrefixArgs(raw);
+      const userName = message.member?.displayName || message.author.username;
+      const embed = await createTarotReadingEmbed(userName, question, spread);
+      await message.reply({ embeds: [embed] });
       return;
     }
 
-    // 2. คำสั่งลูปเพลง: !loop (สลับเปิด/ปิดลูปเพลงปัจจุบัน) หรือ !loop queue (ลูปทั้งคิว)
-    if (lower === "!loop" || lower.startsWith("!loop ")) {
-      const arg = raw.slice("!loop".length).trim();
-      const res = toggleLoop(message.guild.id, arg);
-      if (!res.ok) {
-        await message.reply("ตอนนี้โฮตารุยังไม่ได้เปิดเพลงในห้องเสียงเลยค่ะ");
-        return;
-      }
-      const label =
-        res.mode === "track"
-          ? "เปิดลูปเพลงที่กำลังเล่นอยู่แล้วค่ะ"
-          : res.mode === "queue"
-            ? "เปิดลูปทั้งคิวเพลงแล้วค่ะ"
-            : "ปิดโหมดลูปเพลงแล้วนะคะ";
-      await message.reply(label);
-      return;
-    }
-
-    // 3. คำสั่งข้ามเพลง: !next
-    if (lower === "!next") {
-      const ok = nextMusic(message.guild.id);
-      await message.reply(ok ? "ข้ามไปเพลงถัดไปให้แล้วนะคะ" : "ตอนนี้ยังไม่มีเพลงกำลังเล่นอยู่เลยค่ะ");
-      return;
-    }
-
-    // 4. คำสั่งออกจากห้องเสียง: !leave
-    if (lower === "!leave") {
-      const ok = stopAndLeave(message.guild.id);
-      await message.reply(
-        ok ? "โฮตารุเก็บตะเกียงและออกจากห้องเสียงเรียบร้อยแล้วค่ะ" : "ตอนนี้โฮตารุไม่ได้อยู่ในห้องเสียงค่ะ"
-      );
-      return;
-    }
-
-    // 5. ดูคิวเพลง: !queue
-    if (lower === "!queue") {
-      const snap = getQueueSnapshot(message.guild.id);
-      if (!snap || (!snap.current && snap.upcoming.length === 0)) {
-        await message.reply("ตอนนี้คิวเพลงยังว่างอยู่เลยค่ะ ลองพิมพ์ `!runmusic ชื่อเพลงหรือลิงก์` ได้นะคะ");
-        return;
-      }
-      const list = snap.upcoming.slice(0, 8).map((s, i) => `${i + 1}. ${s.title} (${s.durationRaw})`).join("\n");
-      const loopText = snap.loopMode === "track" ? "เปิดลูปเพลงนี้" : snap.loopMode === "queue" ? "เปิดลูปทั้งคิว" : "ปิดลูป";
-      await message.reply(
-        `**กำลังเล่น:** ${snap.current?.title || "-"} (${loopText})\n**คิวถัดไป:**\n${list || "ไม่มีเพลงรอคิว"}`
-      );
-      return;
-    }
-
-    // 6. Auto-TTS Channel: พิมพ์อะไรในห้องนี้ โฮตารุจะพูดตามใน Voice Chat ทันที
-    if (process.env.AUTO_TTS_CHANNEL_ID && message.channelId === process.env.AUTO_TTS_CHANNEL_ID) {
-      const voiceChannel = message.member?.voice.channel;
-      if (voiceChannel && raw) {
-        await speakTtsInVoice(
-          voiceChannel,
-          raw,
-          message.channel.isSendable() ? message.channel : undefined
-        );
-      }
-      return;
-    }
-
-    // 7. Prefix command !say สำหรับ TTS ด่วน
-    if (lower.startsWith("!say ")) {
-      const text = raw.slice(5).trim();
-      const voiceChannel = message.member?.voice.channel;
-      if (!voiceChannel) {
-        await message.reply("เข้าห้องเสียงก่อนนะคะ เดี๋ยวโฮตารุตามเข้าไปอ่านให้ฟังค่ะ");
-        return;
-      }
-      if (text) {
-        await speakTtsInVoice(
-          voiceChannel,
-          text,
-          message.channel.isSendable() ? message.channel : undefined
-        );
-      }
-      return;
-    }
-
-    // 8. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
+    // 2. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้อง AUTO_CHAT_CHANNEL_ID)
     const isMentioned = client.user ? message.mentions.has(client.user) : false;
     const isAutoChat = process.env.AUTO_CHAT_CHANNEL_ID === message.channelId;
 
@@ -316,9 +184,7 @@ const server = http.createServer((req, res) => {
         hasGroqKey: Boolean(process.env.GROQ_API_KEY?.trim()),
         hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
         aiProvider: process.env.AI_PROVIDER || "auto",
-        ttsProvider: process.env.TTS_PROVIDER || "auto",
         aiDiagnostics,
-        voiceDiagnostics,
         lastError: lastDiscordError,
         uptimeSeconds: Math.floor(process.uptime()),
       })
@@ -346,7 +212,6 @@ process.on("uncaughtException", (err) => {
 
 function shutdownGracefully(signal: string) {
   console.log(`Received ${signal}, shutting down Hotaru gracefully...`);
-  destroyAllVoiceConnections();
   void client.destroy();
   server.close(() => {
     process.exit(0);
