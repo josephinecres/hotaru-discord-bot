@@ -8,6 +8,7 @@ import {
   createAudioPlayer,
   createAudioResource,
   entersState,
+  generateDependencyReport,
   joinVoiceChannel,
   NoSubscriberBehavior,
   StreamType,
@@ -58,6 +59,13 @@ export const voiceDiagnostics = {
   lastPlayedTitle: null as string | null,
   connectionState: "idle" as string,
   stateHistory: [] as string[],
+  dependencyReport: (() => {
+    try {
+      return generateDependencyReport();
+    } catch {
+      return "unavailable";
+    }
+  })(),
 };
 
 const guildStates = new Map<string, GuildAudioState>();
@@ -116,15 +124,30 @@ async function ensureConnection(
   const existing = guildStates.get(voiceChannel.guild.id);
   if (existing && existing.connection.state.status !== VoiceConnectionStatus.Destroyed) {
     if (textChannel) existing.textChannel = textChannel;
-    if (existing.connection.joinConfig.channelId !== voiceChannel.id) {
-      existing.connection.rejoin({
-        channelId: voiceChannel.id,
-        selfDeaf: false,
-        selfMute: false,
-      });
-      await entersState(existing.connection, VoiceConnectionStatus.Ready, 20_000);
+    if (
+      existing.connection.joinConfig.channelId === voiceChannel.id &&
+      existing.connection.state.status === VoiceConnectionStatus.Ready
+    ) {
+      return existing;
     }
-    return existing;
+    try {
+      if (existing.connection.joinConfig.channelId !== voiceChannel.id) {
+        existing.connection.rejoin({
+          channelId: voiceChannel.id,
+          selfDeaf: false,
+          selfMute: false,
+        });
+      }
+      await entersState(existing.connection, VoiceConnectionStatus.Ready, 20_000);
+      return existing;
+    } catch {
+      try {
+        existing.connection.destroy();
+      } catch {
+        // Ignore cleanup error
+      }
+      guildStates.delete(voiceChannel.guild.id);
+    }
   }
 
   // สำคัญ: ตั้ง selfDeaf: false เพื่อไม่ให้บอทขึ้นไอคอนปิดหูฟังตัวเองในห้องเสียง
