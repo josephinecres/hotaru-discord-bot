@@ -10,4 +10,4 @@ COPY . .
 ENV NODE_ENV=production
 EXPOSE 10000
 
-CMD ["npm", "start"]
+CMD ["./node_modules/.bin/tsx", "src/index.ts"]
