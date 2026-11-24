@@ -5,8 +5,10 @@ import http from "node:http";
 import path from "node:path";
 import {
   Client,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
+  Message,
   PermissionFlagsBits,
   REST,
   Routes,
@@ -150,7 +152,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// จัดการคำสั่ง !tarot, !autochating และแชท AI ปกติ (@Hotaru หรือห้องที่ตั้งค่าไว้)
+async function safeReply(message: Message, payload: string | { embeds: EmbedBuilder[] }) {
+  const normalized =
+    typeof payload === "string"
+      ? payload.length > 1950
+        ? `${payload.slice(0, 1945)}...`
+        : payload
+      : payload;
+  try {
+    return await message.reply(normalized);
+  } catch {
+    if ("send" in message.channel && typeof message.channel.send === "function") {
+      return await message.channel.send(normalized);
+    }
+    throw new Error("Unable to send message in this channel");
+  }
+}
+
+// จัดการคำสั่ง !ping, !tarot, !autochating และแชท AI ปกติ (@Hotaru หรือห้องที่ตั้งค่าไว้)
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.guild) return;
 
@@ -158,13 +177,26 @@ client.on(Events.MessageCreate, async (message) => {
     const raw = message.content.trim();
     const lower = raw.toLowerCase();
 
+    // 0. คำสั่งเช็กสถานะด่วน: !ping
+    if (lower === "!ping" || lower === "!status") {
+      const saved = autoChatChannels.get(message.guild.id);
+      const envId = process.env.AUTO_CHAT_CHANNEL_ID?.trim();
+      const activeId = saved === "OFF" ? null : saved || envId || null;
+      const inAutoChannel = activeId === message.channelId;
+      await safeReply(
+        message,
+        `โฮตารุออนไลน์อยู่ค่ะ! (ห้องนี้: ${inAutoChannel ? "เปิดแชทอัตโนมัติอยู่" : "ต้องแท็ก @Hotaru หรือพิมพ์ !autochating เพื่อเปิดแชทอัตโนมัติ"})`
+      );
+      return;
+    }
+
     // 1. คำสั่งเปิดไพ่ทาโรต์: !tarot [1|3] [คำถาม]
     if (lower === "!tarot" || lower.startsWith("!tarot ")) {
-      await message.channel.sendTyping();
+      if ("sendTyping" in message.channel) void message.channel.sendTyping().catch(() => {});
       const { spread, question } = parseTarotPrefixArgs(raw);
       const userName = message.member?.displayName || message.author.username;
       const embed = await createTarotReadingEmbed(userName, question, spread);
-      await message.reply({ embeds: [embed] });
+      await safeReply(message, { embeds: [embed] });
       return;
     }
 
@@ -179,7 +211,7 @@ client.on(Events.MessageCreate, async (message) => {
         message.member?.permissions.has(PermissionFlagsBits.ManageChannels) ||
         message.member?.permissions.has(PermissionFlagsBits.Administrator);
       if (!canManage) {
-        await message.reply("ขออภัยนะคะ คำสั่ง `!autochating` ใช้ได้เฉพาะผู้ดูแลที่มีสิทธิ์ Manage Channels เท่านั้นค่ะ");
+        await safeReply(message, "ขออภัยนะคะ คำสั่ง `!autochating` ใช้ได้เฉพาะผู้ดูแลที่มีสิทธิ์ Manage Channels เท่านั้นค่ะ");
         return;
       }
 
@@ -190,7 +222,8 @@ client.on(Events.MessageCreate, async (message) => {
       if (argLower === "off" || argLower === "stop" || argLower === "disable" || argLower === "ปิด") {
         autoChatChannels.set(message.guild.id, "OFF");
         saveAutoChatChannels();
-        await message.reply(
+        await safeReply(
+          message,
           "ปิดโหมดแชทอัตโนมัติในเซิร์ฟเวอร์นี้แล้วนะคะ หากต้องการคุยกับโฮตารุสามารถแท็ก @Hotaru ได้เหมือนเดิมค่ะ"
         );
         return;
@@ -200,7 +233,8 @@ client.on(Events.MessageCreate, async (message) => {
         const saved = autoChatChannels.get(message.guild.id);
         const envId = process.env.AUTO_CHAT_CHANNEL_ID?.trim();
         const activeId = saved === "OFF" ? null : saved || envId || null;
-        await message.reply(
+        await safeReply(
+          message,
           activeId
             ? `ตอนนี้โฮตารุกำลังเปิดโหมดคุยอัตโนมัติอยู่ในห้อง <#${activeId}> ค่ะ (ID: \`${activeId}\`)`
             : "ตอนนี้ยังไม่ได้ตั้งค่าห้องคุยอัตโนมัติค่ะ พิมพ์ `!autochating` ในห้องที่ต้องการได้เลยนะคะ"
@@ -216,20 +250,27 @@ client.on(Events.MessageCreate, async (message) => {
         (await message.guild.channels.fetch(targetChannelId).catch(() => null));
 
       if (!targetChannel || !targetChannel.isTextBased()) {
-        await message.reply("ไม่พบห้องแชทข้อความที่ระบุค่ะ ลองพิมพ์ `!autochating` ในห้องที่ต้องการ หรือแท็ก `!autochating #ชื่อห้อง` นะคะ");
+        await safeReply(message, "ไม่พบห้องแชทข้อความที่ระบุค่ะ ลองพิมพ์ `!autochating` ในห้องที่ต้องการ หรือแท็ก `!autochating #ชื่อห้อง` นะคะ");
         return;
       }
 
       autoChatChannels.set(message.guild.id, targetChannelId);
       saveAutoChatChannels();
-      await message.reply(
+      await safeReply(
+        message,
         `ตั้งค่าห้อง <#${targetChannelId}> เป็นห้องแชทพูดคุยกับโฮตารุเรียบร้อยแล้วค่ะ ทุกคนสามารถพิมพ์คุยกับโฮตารุในห้องนี้ได้ทันทีโดยไม่ต้องแท็กนะคะ\n*(ID ห้อง: \`${targetChannelId}\` · พิมพ์ \`!autochating off\` เพื่อปิดได้ตลอดเวลา)*`
       );
       return;
     }
 
-    // 3. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru หรืออยู่ในห้องที่ตั้งค่าไว้)
-    const isMentioned = client.user ? message.mentions.has(client.user) : false;
+    // 3. พูดคุยเล่นกับโฮตารุ (เมื่อแท็ก @Hotaru / แท็ก role ของบอท / อยู่ในห้องที่ตั้งค่าไว้)
+    const botMember = message.guild.members.me;
+    const isUserMentioned = client.user ? message.mentions.has(client.user) : false;
+    const isRoleMentioned = botMember
+      ? message.mentions.roles.some((r) => r.managed && botMember.roles.cache.has(r.id))
+      : false;
+    const isMentioned = isUserMentioned || isRoleMentioned;
+
     const savedAutoId = autoChatChannels.get(message.guild.id);
     const envAutoId = process.env.AUTO_CHAT_CHANNEL_ID?.trim();
     const isAutoChat =
@@ -240,21 +281,30 @@ client.on(Events.MessageCreate, async (message) => {
           : envAutoId === message.channelId;
 
     if (isMentioned || isAutoChat) {
-      const cleanContent = raw.replace(/<@!?\d+>/g, "").trim();
-      if (!cleanContent) return;
+      const cleanContent = raw.replace(/<@[!&]?\d+>/g, "").trim();
+      if (!cleanContent) {
+        if (isMentioned) {
+          await safeReply(
+            message,
+            "มีอะไรให้โฮตารุช่วยดูแลไหมคะ? พิมพ์ข้อความต่อท้ายแท็กได้เลยนะคะ หรือพิมพ์ `!tarot` เพื่อเปิดไพ่ทาโรต์ก็ได้ค่ะ"
+          );
+        }
+        return;
+      }
 
-      await message.channel.sendTyping();
+      if ("sendTyping" in message.channel) void message.channel.sendTyping().catch(() => {});
       const reply = await chatAsHotaru(
         message.channelId,
         message.member?.displayName || message.author.username,
         cleanContent
       );
-      await message.reply(reply);
+      await safeReply(message, reply);
     }
   } catch (err) {
     console.error("Message handler error:", err);
     try {
-      await message.reply(
+      await safeReply(
+        message,
         "ขออภัยนะคะ เกิดขัดข้องเล็กน้อยระหว่างจัดการคำขอ ลองใหม่อีกครั้งนะคะ"
       );
     } catch {
@@ -283,6 +333,7 @@ const server = http.createServer((req, res) => {
         hasGroqKey: Boolean(process.env.GROQ_API_KEY?.trim()),
         hasGeminiKey: Boolean(process.env.GEMINI_API_KEY?.trim()),
         aiProvider: process.env.AI_PROVIDER || "auto",
+        envAutoChatChannelId: process.env.AUTO_CHAT_CHANNEL_ID?.trim() || null,
         autoChatChannels: Object.fromEntries(autoChatChannels.entries()),
         aiDiagnostics,
         lastError: lastDiscordError,

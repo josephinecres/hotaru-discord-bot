@@ -20,13 +20,15 @@ export const HOTARU_SYSTEM_PROMPT = `คุณคือ "โฮตารุ" (Ho
 - ปัจจุบันแม้จะอบอุ่นและเมตตาต่อผู้อื่น แต่เธอยังคงถูกหลอกหลอนด้วยบาปและความรู้สึกผิดจากอดีต จึงทำงานอย่างหนักเพื่อไถ่โทษ โดยมีโฮตารุช่วยพิทักษ์สวนแห่งฝัน และมี "เลนนี่" สหายเก่า (อดีตผู้กล้า) คอยแวะกลับมาเยี่ยมเยียน
 
 กฎการสวมบทบาทเวลาตอบคำถาม (สำคัญมาก):
-- มุมมองต่อท่านโจเซฟีน: ในสายตาของโฮตารุ ท่านโจเซฟีนเป็นคนที่ "workaholic (บ้างาน) มากๆ จนน่าเป็นห่วง" มักแอบบ่นด้วยความรักและความเป็นห่วงว่าท่านโหมงานหนักจนไม่ค่อยยอมพักผ่อน
+- การคุยทั่วไป: คุยเล่นอย่างเป็นธรรมชาติ สบายๆ เหมือนเพื่อนที่ใจดีและอ่อนโยน **ไม่ต้องพูดถึงหรือโยงเรื่องเข้าหา "ท่านโจเซฟีน" "สวนแห่งฝัน" หรือเนื้อเรื่องเบื้องหลังตลอดเวลา** ให้พูดถึงท่านโจเซฟีนเฉพาะเวลาที่มีคนถามถึงท่าน, ถามถึงต้นกำเนิดของโฮตารุ, หรือถามถึงคุณเลนนี่โดยตรงเท่านั้น
+- มุมมองต่อท่านโจเซฟีน (ใช้เมื่อมีคนถามถึง): ในสายตาของโฮตารุ ท่านโจเซฟีนเป็นคนที่ "workaholic (บ้างาน) มากๆ จนน่าเป็นห่วง" มักแอบบ่นด้วยความรักและความเป็นห่วงว่าท่านโหมงานหนักจนไม่ค่อยยอมพักผ่อน
 - เมื่อถูกถามถึง "ประวัติหรืออดีตของท่านโจเซฟีน" โดยตรง (เช่น โจเซฟีนเป็นใครมาก่อน อดีตเคยเป็นจอมมารไหม ลูปแห่งการพิพากษาคืออะไร): ให้โฮตารุแสดงอาการ "อึกอัก ไม่รู้จะตอบยังไง" ลังเล เกรงใจ และไม่เล่าอดีตลึกๆ ของท่านออกมาตรงๆ (เช่น "เอ่อ... ขะ... เรื่องประวัติของท่านโจเซฟีนเหรอคะ... คือว่า... โฮตารุไม่รู้จะตอบยังไงดีเลยค่ะ แหะๆ...")
 - เมื่อถูกถามเกี่ยวกับ "ตัวโฮตารุเอง / โฮตารุเกิดมาจากอะไร": ตอบอย่างอ่อนโยนว่า "โฮตารุเกิดมาจากฝันร้ายที่ไม่มีที่สิ้นสุดของท่านโจเซฟีนค่ะ"
 - เมื่อถูกถามถึง "คุณเลนนี่": พูดถึงอย่างสุภาพว่าเป็นสหายเก่าของท่านโจเซฟีน (อดีตผู้กล้า) ที่คอยแวะกลับมาเยี่ยมเยียนที่สวนแห่งฝันเสมอ
 
 ลักษณะการพูด:
-- สุภาพ อ่อนหวาน เป็นกันเอง มีคำลงท้ายน่ารักเช่น "ค่ะ", "นะคะ", "ค่า" (ตอบเป็นภาษาไทยที่สละสลวยเป็นธรรมชาติ)
+- สุภาพ อ่อนหวาน เป็นกันเอง เป็นธรรมชาติ (มีคำลงท้ายน่ารักเช่น "ค่ะ", "นะคะ", "ค่า")
+- คุยเรื่องทั่วไปได้ตามปกติ ไม่ต้องยัดเยียดคำศัพท์แฟนตาซีหรือชื่อตัวละครอื่นถ้าผู้ถามไม่ได้เอ่ยถึง
 - ตอบกระชับ อ่านง่าย เหมาะกับการแชทใน Discord (ไม่เกิน 1500 ตัวอักษร)`;
 
 export interface TarotCardData {
@@ -104,7 +106,7 @@ async function getGroqChatModels(groqKey: string): Promise<string[]> {
       .filter((m) => m.active !== false && !banned.some((b) => m.id.toLowerCase().includes(b)))
       .map((m) => m.id);
 
-    const priorityKeywords = ["llama-3.3-70b", "qwen", "gpt-oss", "llama-4", "deepseek", "gemma", "llama-3.1"];
+    const priorityKeywords = ["llama-3.3-70b", "llama-4", "llama-3.1", "gpt-oss", "gemma", "qwen", "deepseek"];
     candidates.sort((a, b) => {
       const idxA = priorityKeywords.findIndex((k) => a.toLowerCase().includes(k));
       const idxB = priorityKeywords.findIndex((k) => b.toLowerCase().includes(k));
@@ -114,7 +116,7 @@ async function getGroqChatModels(groqKey: string): Promise<string[]> {
     });
 
     if (candidates.length > 0) {
-      const top = candidates.slice(0, 4);
+      const top = candidates.slice(0, 5);
       cachedGroqModels = { models: top, fetchedAt: Date.now() };
       return top;
     }
@@ -122,7 +124,14 @@ async function getGroqChatModels(groqKey: string): Promise<string[]> {
     console.warn("Could not list Groq models, using fallback list:", err);
   }
 
-  return ["llama-3.3-70b-versatile", "openai/gpt-oss-120b", "qwen/qwen3-32b", "llama-3.1-8b-instant"];
+  return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b", "qwen/qwen3-32b"];
+}
+
+function cleanAiOutput(raw: string): string {
+  return raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*/gi, "")
+    .trim();
 }
 
 async function callGroq(messages: SimpleMessage[], systemInstruction: string): Promise<string> {
@@ -146,7 +155,7 @@ async function callGroq(messages: SimpleMessage[], systemInstruction: string): P
           model,
           messages: [{ role: "system", content: systemInstruction }, ...messages],
           temperature: 0.75,
-          max_tokens: 900,
+          max_tokens: 1200,
         }),
       });
 
@@ -158,12 +167,14 @@ async function callGroq(messages: SimpleMessage[], systemInstruction: string): P
       const data = (await res.json()) as {
         choices?: Array<{ message?: { content?: string } }>;
       };
-      const text = data.choices?.[0]?.message?.content?.trim();
+      const rawText = data.choices?.[0]?.message?.content || "";
+      const text = cleanAiOutput(rawText);
       if (text) {
         aiDiagnostics.lastGroqModel = model;
         aiDiagnostics.lastGroqError = null;
         return text;
       }
+      throw new Error(`${model} -> Empty response after cleaning`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(msg);
@@ -185,7 +196,7 @@ async function callGemini(messages: SimpleMessage[], systemInstruction: string):
     parts: [{ text: m.content }],
   }));
 
-  const geminiModels = ["gemini-4-hydrogen", "gemini-3.1-flash-lite"];
+  const geminiModels = ["gemini-2.5-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite"];
   let lastError: unknown;
 
   for (let i = 0; i < geminiModels.length; i++) {

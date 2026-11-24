@@ -51,7 +51,7 @@ ${summaryForAi}
         inline: true,
       }))
     )
-    .setFooter({ text: "ดูแลคำทำนายโดย โฮตารุ · เลขาของท่านโจเซฟีน" })
+    .setFooter({ text: "ดูแลคำทำนายโดย โฮตารุ" })
     .setTimestamp();
 
   return embed;
